@@ -1,0 +1,17 @@
+docs/
+dist/
+node_modules/
+*.tgz
+extensions/
+openclaw-src/
+.claude/
+openclaw-source-code/
+.tempurai/
+
+node_modules
+package-lock.json
+dist
+
+im-node-sdk-dist
+.claude-internal
+.claude-bak

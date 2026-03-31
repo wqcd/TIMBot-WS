@@ -1,0 +1,251 @@
+import type {
+  ChannelAccountSnapshot,
+  ChannelPlugin,
+  OpenClawConfig,
+} from "openclaw/plugin-sdk";
+import {
+  DEFAULT_ACCOUNT_ID,
+  deleteAccountFromConfigSection,
+  formatPairingApproveHint,
+  setAccountEnabledInConfigSection,
+} from "openclaw/plugin-sdk";
+
+import { listTimbotAccountIds, resolveDefaultTimbotAccountId, resolveTimbotAccount } from "./accounts.js";
+import { timbotConfigSchema } from "./config-schema.js";
+import { timbotOnboardingAdapter } from "./onboarding.js";
+import type { ResolvedTimbotAccount } from "./types.js";
+import { registerTimbotWebhookTarget, sendTimbotMessage, sendTimbotGroupMessage } from "./monitor.js";
+
+const meta = {
+  id: "timbot",
+  label: "Tencent IM",
+  selectionLabel: "Tencent IM (timbot)",
+  detailLabel: "Tencent Cloud IM Bot",
+  docsPath: "/channels/timbot",
+  docsLabel: "timbot",
+  blurb: "Tencent Cloud IM bot via webhooks + REST API.",
+  aliases: ["tencentim", "腾讯im", "即时通信"],
+  order: 85,
+  quickstartAllowFrom: true,
+};
+
+function normalizeTimbotMessagingTarget(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/^(timbot|tencentim):/i, "").trim() || undefined;
+}
+
+export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
+  id: "timbot",
+  meta,
+  onboarding: timbotOnboardingAdapter,
+  capabilities: {
+    chatTypes: ["direct", "group"],
+    media: false,
+    reactions: false,
+    threads: false,
+    polls: false,
+    nativeCommands: false,
+    blockStreaming: false,
+  },
+  reload: { configPrefixes: ["channels.timbot"] },
+  configSchema: timbotConfigSchema,
+  config: {
+    listAccountIds: (cfg) => listTimbotAccountIds(cfg as OpenClawConfig),
+    resolveAccount: (cfg, accountId) => resolveTimbotAccount({ cfg: cfg as OpenClawConfig, accountId }),
+    defaultAccountId: (cfg) => resolveDefaultTimbotAccountId(cfg as OpenClawConfig),
+    setAccountEnabled: ({ cfg, accountId, enabled }) =>
+      setAccountEnabledInConfigSection({
+        cfg: cfg as OpenClawConfig,
+        sectionKey: "timbot",
+        accountId,
+        enabled,
+        allowTopLevel: true,
+      }),
+    deleteAccount: ({ cfg, accountId }) =>
+      deleteAccountFromConfigSection({
+        cfg: cfg as OpenClawConfig,
+        sectionKey: "timbot",
+        clearBaseFields: ["name", "webhookPath", "sdkAppId", "identifier", "secretKey", "botAccount", "apiDomain", "welcomeText", "typingText", "streamingMode", "fallbackPolicy", "overflowPolicy"],
+        accountId,
+      }),
+    isConfigured: (account) => account.configured,
+    describeAccount: (account): ChannelAccountSnapshot => ({
+      accountId: account.accountId,
+      name: account.name,
+      enabled: account.enabled,
+      configured: account.configured,
+      webhookPath: account.config.webhookPath ?? "/timbot",
+    }),
+    resolveAllowFrom: ({ cfg, accountId }) => {
+      const account = resolveTimbotAccount({ cfg: cfg as OpenClawConfig, accountId });
+      return (account.config.dm?.allowFrom ?? []).map((entry) => String(entry));
+    },
+    formatAllowFrom: ({ allowFrom }) =>
+      allowFrom
+        .map((entry) => String(entry).trim())
+        .filter(Boolean)
+        .map((entry) => entry.toLowerCase()),
+  },
+  security: {
+    resolveDmPolicy: ({ cfg, accountId, account }) => {
+      const resolvedAccountId = accountId ?? account.accountId ?? DEFAULT_ACCOUNT_ID;
+      const useAccountPath = Boolean((cfg as OpenClawConfig).channels?.timbot?.accounts?.[resolvedAccountId]);
+      const basePath = useAccountPath ? `channels.timbot.accounts.${resolvedAccountId}.` : "channels.timbot.";
+      const policy = account.config.dm?.policy ?? "open";
+      const rawAllowFrom = (account.config.dm?.allowFrom ?? []).map((entry) => String(entry));
+      const allowFrom = policy === "open" && rawAllowFrom.length === 0 ? ["*"] : rawAllowFrom;
+      return {
+        policy,
+        allowFrom,
+        policyPath: `${basePath}dm.policy`,
+        allowFromPath: `${basePath}dm.allowFrom`,
+        approveHint: formatPairingApproveHint("timbot"),
+        normalizeEntry: (raw) => raw.trim().toLowerCase(),
+      };
+    },
+  },
+  groups: {
+    resolveRequireMention: () => true,
+  },
+  threading: {
+    resolveReplyToMode: () => "off",
+  },
+  messaging: {
+    normalizeTarget: normalizeTimbotMessagingTarget,
+    targetResolver: {
+      looksLikeId: (raw) => Boolean(raw.trim()),
+      hint: "<userid> or group:<groupid>",
+    },
+  },
+  outbound: {
+    deliveryMode: "direct",
+    chunkerMode: "text",
+    textChunkLimit: 10000,
+    sendText: async ({ account, target, text }) => {
+      // target 以 "group:" 开头表示群消息
+      if (target.startsWith("group:")) {
+        const groupId = target.slice("group:".length);
+        const result = await sendTimbotGroupMessage({
+          account,
+          groupId,
+          text,
+          fromAccount: account.botAccount,
+        });
+        return {
+          channel: "timbot",
+          ok: result.ok,
+          messageId: result.messageId ?? "",
+          error: result.error ? new Error(result.error) : undefined,
+        };
+      }
+
+      const result = await sendTimbotMessage({
+        account,
+        toAccount: target,
+        text,
+        fromAccount: account.botAccount,
+      });
+
+      return {
+        channel: "timbot",
+        ok: result.ok,
+        messageId: result.messageId ?? "",
+        error: result.error ? new Error(result.error) : undefined,
+      };
+    },
+  },
+  status: {
+    defaultRuntime: {
+      accountId: DEFAULT_ACCOUNT_ID,
+      running: false,
+      lastStartAt: null,
+      lastStopAt: null,
+      lastError: null,
+    },
+    buildChannelSummary: ({ snapshot }) => ({
+      configured: snapshot.configured ?? false,
+      running: snapshot.running ?? false,
+      webhookPath: snapshot.webhookPath ?? null,
+      lastStartAt: snapshot.lastStartAt ?? null,
+      lastStopAt: snapshot.lastStopAt ?? null,
+      lastError: snapshot.lastError ?? null,
+      lastInboundAt: snapshot.lastInboundAt ?? null,
+      lastOutboundAt: snapshot.lastOutboundAt ?? null,
+      probe: snapshot.probe,
+      lastProbeAt: snapshot.lastProbeAt ?? null,
+    }),
+    probeAccount: async () => ({ ok: true }),
+    buildAccountSnapshot: ({ account, runtime }) => ({
+      accountId: account.accountId,
+      name: account.name,
+      enabled: account.enabled,
+      configured: account.configured,
+      webhookPath: account.config.webhookPath ?? "/timbot",
+      running: runtime?.running ?? false,
+      lastStartAt: runtime?.lastStartAt ?? null,
+      lastStopAt: runtime?.lastStopAt ?? null,
+      lastError: runtime?.lastError ?? null,
+      lastInboundAt: runtime?.lastInboundAt ?? null,
+      lastOutboundAt: runtime?.lastOutboundAt ?? null,
+      dmPolicy: account.config.dm?.policy ?? "open",
+    }),
+  },
+  gateway: {
+    startAccount: async (ctx) => {
+      const account = ctx.account;
+
+      ctx.log?.debug(`启动账号: ${account.accountId}, configured=${account.configured}, enabled=${account.enabled}`);
+      ctx.log?.debug(`sdkAppId=${account.sdkAppId ?? "[未设置]"}, secretKey=${account.secretKey ? "[已配置]" : "[未设置]"}`);
+
+      if (!account.configured) {
+        ctx.log?.warn(`[${account.accountId}] timbot not configured; skipping webhook registration`);
+        ctx.setStatus({ accountId: account.accountId, running: false, configured: false });
+        return;
+      }
+      const path = (account.config.webhookPath ?? "/timbot").trim();
+      const unregister = registerTimbotWebhookTarget({
+        account,
+        config: ctx.cfg as OpenClawConfig,
+        runtime: ctx.runtime,
+        core: ({} as unknown) as any,
+        path,
+        statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
+      });
+      ctx.log?.info(`[${account.accountId}] timbot webhook registered at ${path}`);
+      ctx.setStatus({
+        accountId: account.accountId,
+        running: true,
+        configured: true,
+        webhookPath: path,
+        lastStartAt: Date.now(),
+      });
+
+      // 保持 Promise 挂起直到 abortSignal 触发，避免 gateway 判定 channel 退出
+      return new Promise<void>((resolve) => {
+        const onAbort = () => {
+          unregister();
+          ctx.log?.info(`[${account.accountId}] timbot webhook unregistered`);
+          ctx.setStatus({
+            accountId: account.accountId,
+            running: false,
+            lastStopAt: Date.now(),
+          });
+          resolve();
+        };
+        if (ctx.abortSignal.aborted) {
+          onAbort();
+          return;
+        }
+        ctx.abortSignal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    stopAccount: async (ctx) => {
+      ctx.setStatus({
+        accountId: ctx.account.accountId,
+        running: false,
+        lastStopAt: Date.now(),
+      });
+    },
+  },
+};

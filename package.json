@@ -1,0 +1,68 @@
+{
+  "name": "timbot",
+  "version": "2026.3.31-beta.2",
+  "type": "module",
+  "description": "OpenClaw Tencent Cloud IM intelligent bot channel plugin",
+  "author": "longyuqi@tencent.com",
+  "license": "MIT",
+  "homepage": "https://github.com/wbxl2000/timbot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wbxl2000/timbot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wbxl2000/timbot/issues"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json"
+  ],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "tencent-im",
+    "timbot",
+    "chatbot"
+  ],
+  "scripts": {
+    "build": "tsc && mkdir -p dist/src/debug && cp src/debug/GenerateTestUserSig-es.js src/debug/lib-generate-test-usersig-es.min.js dist/src/debug/",
+    "test": "pnpm build && node --test test/*.test.mjs"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "channel": {
+      "id": "timbot",
+      "label": "Tencent IM",
+      "selectionLabel": "Tencent IM (timbot)",
+      "detailLabel": "Tencent Cloud IM Bot",
+      "docsPath": "/channels/timbot",
+      "docsLabel": "timbot",
+      "blurb": "Tencent Cloud IM bot via webhooks + REST API.",
+      "aliases": [
+        "tencentim",
+        "腾讯im",
+        "即时通信"
+      ],
+      "order": 85
+    },
+    "install": {
+      "npmSpec": "timbot",
+      "localPath": "extensions/timbot",
+      "defaultChoice": "npm"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.30 <=2026.3.24"
+  },
+  "overrides": {
+    "axios": "1.14.0"
+  }
+}
