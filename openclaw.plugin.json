@@ -1,9 +1,9 @@
 {
-  "id": "timbot",
+  "id": "timbot-ws",
   "name": "Tencent IM",
   "description": "Clawdbot Tencent Cloud IM intelligent bot channel plugin",
   "version": "2026.1.30",
-  "channels": ["timbot"],
+  "channels": ["timbot-ws"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

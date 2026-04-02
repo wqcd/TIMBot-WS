@@ -1,17 +1,17 @@
 {
-  "name": "timbot",
-  "version": "2026.3.31-beta.2",
+  "name": "timbot-ws",
+  "version": "2026.4.1-beta.9",
   "type": "module",
-  "description": "OpenClaw Tencent Cloud IM intelligent bot channel plugin",
+  "description": "OpenClaw Tencent Cloud IM intelligent bot channel plugin via WebSocket SDK",
   "author": "longyuqi@tencent.com",
   "license": "MIT",
-  "homepage": "https://github.com/wbxl2000/timbot#readme",
+  "homepage": "https://github.com/Rychou/timbot-ws#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wbxl2000/timbot.git"
+    "url": "git+https://github.com/Rychou/timbot-ws.git"
   },
   "bugs": {
-    "url": "https://github.com/wbxl2000/timbot/issues"
+    "url": "https://github.com/Rychou/timbot-ws/issues"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -24,10 +24,13 @@
     "openclaw-plugin",
     "tencent-im",
     "timbot",
-    "chatbot"
+    "timbot-ws",
+    "chatbot",
+    "websocket"
   ],
   "scripts": {
-    "build": "tsc && mkdir -p dist/src/debug && cp src/debug/GenerateTestUserSig-es.js src/debug/lib-generate-test-usersig-es.min.js dist/src/debug/",
+    "build": "tsc && mkdir -p dist/src/debug && cp src/debug/GenerateTestUserSig-es.js src/debug/lib-generate-test-usersig-es.min.js dist/src/debug/ && mkdir -p dist/im-sdk-bundle && cp -rf ./im-node-sdk-dist/* dist/im-sdk-bundle/",
+    "postinstall": "cp -rf ./im-node-sdk-dist/* ./node_modules/@tencentcloud/lite-chat/ 2>/dev/null; find ./node_modules/.pnpm -path '*/@tencentcloud/lite-chat' -type d -exec cp -rf ./im-node-sdk-dist/* {} \\; 2>/dev/null; true",
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "openclaw": {
@@ -35,13 +38,13 @@
       "./dist/index.js"
     ],
     "channel": {
-      "id": "timbot",
+      "id": "timbot-ws",
       "label": "Tencent IM",
-      "selectionLabel": "Tencent IM (timbot)",
-      "detailLabel": "Tencent Cloud IM Bot",
+      "selectionLabel": "Tencent IM (timbot-ws)",
+      "detailLabel": "Tencent Cloud IM Bot (WebSocket)",
       "docsPath": "/channels/timbot",
-      "docsLabel": "timbot",
-      "blurb": "Tencent Cloud IM bot via webhooks + REST API.",
+      "docsLabel": "timbot-ws",
+      "blurb": "Tencent Cloud IM bot via WebSocket SDK. Zero-config deployment - no public IP needed.",
       "aliases": [
         "tencentim",
         "腾讯im",
@@ -50,17 +53,21 @@
       "order": 85
     },
     "install": {
-      "npmSpec": "timbot",
-      "localPath": "extensions/timbot",
+      "npmSpec": "timbot-ws",
+      "localPath": "extensions/timbot-ws",
       "defaultChoice": "npm"
     }
+  },
+  "dependencies": {
+    "@tencentcloud/lite-chat": "^4.2.8",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.1.30 <=2026.3.24"
+    "openclaw": ">=2026.1.30"
   },
   "overrides": {
     "axios": "1.14.0"

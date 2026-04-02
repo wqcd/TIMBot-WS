@@ -12,6 +12,7 @@ node_modules
 package-lock.json
 dist
 
-im-node-sdk-dist
 .claude-internal
 .claude-bak
+
+im-node-sdk-dist

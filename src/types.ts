@@ -11,13 +11,11 @@ export type TimbotAccountConfig = {
   name?: string;
   enabled?: boolean;
 
-  webhookPath?: string;
   sdkAppId?: string;
   identifier?: string;
-  secretKey?: string;
+  userId?: string;
+  userSig?: string;
   botAccount?: string;
-  apiDomain?: string;
-  token?: string;
 
   dm?: TimbotDmConfig;
   welcomeText?: string;
@@ -40,10 +38,9 @@ export type ResolvedTimbotAccount = {
   configured: boolean;
   sdkAppId?: string;
   identifier?: string;
-  secretKey?: string;
+  userId?: string;
+  userSig?: string;
   botAccount?: string;
-  apiDomain: string;
-  token?: string;
   streamingMode: TimbotStreamingMode;
   fallbackPolicy: TimbotStreamingFallbackPolicy;
   overflowPolicy: TimbotOverflowPolicy;
@@ -55,6 +52,9 @@ export type TimbotMsgBodyElement = {
   MsgType: string;
   MsgContent: {
     Text?: string;
+    Data?: string;
+    Desc?: string;
+    Ext?: string;
     // 可扩展其他消息类型的字段
     [key: string]: unknown;
   };

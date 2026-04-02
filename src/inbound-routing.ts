@@ -5,7 +5,7 @@ import type {
 } from "./types.js";
 
 export type TimbotWebhookRoutingTarget = {
-  account: Pick<ResolvedTimbotAccount, "configured" | "sdkAppId" | "botAccount" | "token">;
+  account: Pick<ResolvedTimbotAccount, "configured" | "sdkAppId" | "botAccount">;
 };
 
 function normalizeBotAccount(raw: string | undefined): string | undefined {

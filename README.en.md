@@ -1,10 +1,28 @@
-# Tencent Cloud IM Channel Plugin for OpenClaw
+# timbot-ws - Tencent Cloud IM WebSocket Channel Plugin
 
-Maintainer: longyuqi@tencent.com
+Maintainer: leochliu@tencent.com
 
-Tencent Cloud IM intelligent bot via webhooks + REST API.
+Tencent Cloud IM intelligent bot via WebSocket SDK.
+
+**✨ No public IP required. Zero-config deployment. Ready to use.**
 
 For a full integration tutorial, see: **[Tencent Cloud Official Documentation](https://cloud.tencent.com/document/product/269/128326)**
+
+---
+
+## Comparison with timbot (Webhook Version)
+
+| Feature | timbot-ws (WebSocket) | timbot (Webhook) |
+|---------|----------------------|------------------|
+| **Deployment** | No public IP needed | Requires public IP + HTTPS |
+| **Connection** | Long-lived connection | Passive Webhook callbacks |
+| **Use Cases** | Local dev, intranet, quick prototyping | Production, high concurrency, multi-instance |
+| **Multi-Agent** | 🚧 Single-bot multi-agent not supported | ✅ Supported |
+| **Streaming** | ⚠️ Partial (text_modify/custom_modify only) | ✅ Full support (including native TIMStreamElem) |
+
+> ⚠️ **Note**: timbot-ws currently does not support single-bot multi-agent mode. Use timbot (Webhook version) if you need this feature. See [Limitations](#limitations).
+
+---
 
 ## Install
 
@@ -102,3 +120,25 @@ openclaw config set channels.timbot.overflowPolicy split
 # Customize typing placeholder text
 openclaw config set channels.timbot.typingText "Thinking, please wait..."
 ```
+
+---
+
+## Limitations
+
+### tim_stream Mode Not Supported
+
+The `tim_stream` mode (native `TIMStreamElem` streaming messages) is **not available** in timbot-ws.
+
+**Reason**: The Tencent IM Node SDK currently does not support sending streaming messages (`TIMStreamElem`). This feature is only available via server-side REST API.
+
+**Available streaming modes**:
+| Mode | Available | Description |
+|------|-----------|-------------|
+| `off` | ✅ | No streaming, send final message at once |
+| `text_modify` | ✅ | Typewriter effect via text message modification |
+| `custom_modify` | ✅ | Custom message modification, frontend renders |
+| `tim_stream` | ❌ | Not supported, use timbot (Webhook version) |
+
+### Single-Bot Multi-Agent Not Supported
+
+timbot-ws currently **does not support single-bot multi-agent mode**.

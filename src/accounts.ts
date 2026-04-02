@@ -1,5 +1,13 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "openclaw/plugin-sdk";
+
+const DEFAULT_ACCOUNT_ID = "default";
+
+function normalizeAccountId(raw: string | null | undefined): string {
+  if (!raw || typeof raw !== "string") return DEFAULT_ACCOUNT_ID;
+  const trimmed = raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  if (!trimmed || trimmed === "__proto__" || trimmed === "constructor") return DEFAULT_ACCOUNT_ID;
+  return trimmed.slice(0, 64);
+}
 
 import type {
   ResolvedTimbotAccount,
@@ -11,10 +19,8 @@ import type {
 } from "./types.js";
 import { logSimple } from "./logger.js";
 
-const DEFAULT_API_DOMAIN = "console.tim.qq.com";
-
 function listConfiguredAccountIds(cfg: OpenClawConfig): string[] {
-  const accounts = (cfg.channels?.timbot as TimbotConfig | undefined)?.accounts;
+  const accounts = (cfg.channels?.["timbot-ws"] as TimbotConfig | undefined)?.accounts;
   if (!accounts || typeof accounts !== "object") return [];
   return Object.keys(accounts).filter(Boolean);
 }
@@ -26,7 +32,7 @@ export function listTimbotAccountIds(cfg: OpenClawConfig): string[] {
 }
 
 export function resolveDefaultTimbotAccountId(cfg: OpenClawConfig): string {
-  const timbotConfig = cfg.channels?.timbot as TimbotConfig | undefined;
+  const timbotConfig = cfg.channels?.["timbot-ws"] as TimbotConfig | undefined;
   if (timbotConfig?.defaultAccount?.trim()) return timbotConfig.defaultAccount.trim();
   const ids = listTimbotAccountIds(cfg);
   if (ids.includes(DEFAULT_ACCOUNT_ID)) return DEFAULT_ACCOUNT_ID;
@@ -37,13 +43,13 @@ function resolveAccountConfig(
   cfg: OpenClawConfig,
   accountId: string,
 ): TimbotAccountConfig | undefined {
-  const accounts = (cfg.channels?.timbot as TimbotConfig | undefined)?.accounts;
+  const accounts = (cfg.channels?.["timbot-ws"] as TimbotConfig | undefined)?.accounts;
   if (!accounts || typeof accounts !== "object") return undefined;
   return accounts[accountId] as TimbotAccountConfig | undefined;
 }
 
 function mergeTimbotAccountConfig(cfg: OpenClawConfig, accountId: string): TimbotAccountConfig {
-  const raw = (cfg.channels?.timbot ?? {}) as TimbotConfig;
+  const raw = (cfg.channels?.["timbot-ws"] ?? {}) as TimbotConfig;
   const { accounts: _ignored, defaultAccount: _ignored2, ...base } = raw;
   const account = resolveAccountConfig(cfg, accountId) ?? {};
   const merged = { ...base, ...account };
@@ -56,7 +62,7 @@ export function resolveTimbotAccount(params: {
   accountId?: string | null;
 }): ResolvedTimbotAccount {
   const accountId = normalizeAccountId(params.accountId);
-  const timbotConfig = params.cfg.channels?.timbot as TimbotConfig | undefined;
+  const timbotConfig = params.cfg.channels?.["timbot-ws"] as TimbotConfig | undefined;
   const baseEnabled = timbotConfig?.enabled !== false;
   const merged = mergeTimbotAccountConfig(params.cfg, accountId);
   const enabled = baseEnabled && merged.enabled !== false;
@@ -64,10 +70,9 @@ export function resolveTimbotAccount(params: {
   // 从合并后的配置中提取字段
   const sdkAppId = merged.sdkAppId?.trim() || undefined;
   const identifier = merged.identifier?.trim() || undefined;
-  const secretKey = merged.secretKey?.trim() || undefined;
+  const userId = merged.userId?.trim() || identifier || undefined;
+  const userSig = merged.userSig?.trim() || undefined;
   const botAccount = merged.botAccount?.trim() || undefined;
-  const apiDomain = merged.apiDomain?.trim() || DEFAULT_API_DOMAIN;
-  const token = merged.token?.trim() || undefined;
   const streamingMode: TimbotStreamingMode =
     merged.streamingMode === "custom_modify"
       ? "custom_modify"
@@ -85,16 +90,17 @@ export function resolveTimbotAccount(params: {
       ? "split"
       : "stop";
 
-  // 配置完整需要 sdkAppId + secretKey（identifier 可选，默认使用 administrator）
-  const configured = Boolean(sdkAppId && secretKey);
+  // 配置完整需要 sdkAppId + userId + userSig
+  const configured = Boolean(sdkAppId && userId && userSig);
 
   // 配置不完整时输出警告
   if (!configured && Boolean(timbotConfig)) {
     const missing: string[] = [];
     if (!sdkAppId) missing.push("sdkAppId");
-    if (!secretKey) missing.push("secretKey");
+    if (!userId) missing.push("userId");
+    if (!userSig) missing.push("userSig");
     if (missing.length > 0) {
-      logSimple("warn", `配置不完整，缺少: ${missing.join(", ")}`);
+      logSimple("warn", `incomplete config, missing: ${missing.join(", ")}`);
     }
   }
 
@@ -105,10 +111,9 @@ export function resolveTimbotAccount(params: {
     configured,
     sdkAppId,
     identifier,
-    secretKey,
+    userId,
+    userSig,
     botAccount,
-    apiDomain,
-    token,
     streamingMode,
     fallbackPolicy,
     overflowPolicy,

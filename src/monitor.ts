@@ -1,22 +1,15 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
-
 import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk";
 
 import type {
   ResolvedTimbotAccount,
   TimbotInboundMessage,
   TimbotMsgBodyElement,
-  TimbotSendGroupMsgRequest,
-  TimbotSendMsgResponse,
 } from "./types.js";
 import { getTimbotRuntime } from "./runtime.js";
-import { genTestUserSig } from "./debug/GenerateTestUserSig-es.js";
 import { LOG_PREFIX, logSimple } from "./logger.js";
 import {
   extractMentionedBotAccounts,
   extractTextFromMsgBody,
-  matchTimbotWebhookTargetsBySdkAppId,
   selectTimbotWebhookTarget,
 } from "./inbound-routing.js";
 import {
@@ -30,6 +23,7 @@ import {
   buildTextMsgBody,
 } from "./streaming-policy.js";
 import type { TimbotTimStreamChunk } from "./streaming-policy.js";
+import type { WsTransport, Message } from "./ws-transport.js";
 
 export type TimbotRuntimeEnv = {
   log?: (message: string) => void;
@@ -37,21 +31,19 @@ export type TimbotRuntimeEnv = {
   error?: (message: string) => void;
 };
 
-type TimbotWebhookTarget = {
+export type TimbotWsTarget = {
   account: ResolvedTimbotAccount;
   config: OpenClawConfig;
   runtime: TimbotRuntimeEnv;
   core: PluginRuntime;
-  path: string;
+  transport: WsTransport;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
 };
 
-const webhookTargets = new Map<string, TimbotWebhookTarget[]>();
+const wsTargets = new Map<string, TimbotWsTarget[]>();
 
-// ============ 日志工具（带 target） ============
-
-/** 带 target 的日志（有 runtime 回调） */
-function log(target: TimbotWebhookTarget, level: "info" | "warn" | "error", message: string): void {
+/** 带 target 上下文的日志 */
+function log(target: TimbotWsTarget, level: "info" | "warn" | "error", message: string): void {
   const full = `${LOG_PREFIX} ${message}`;
   if (level === "error") {
     target.runtime.error?.(full);
@@ -62,93 +54,13 @@ function log(target: TimbotWebhookTarget, level: "info" | "warn" | "error", mess
   }
 }
 
-/** verbose 日志（仅在 --verbose 时输出） */
-function logVerbose(target: TimbotWebhookTarget, message: string): void {
+/** verbose 日志 */
+function logVerbose(target: TimbotWsTarget, message: string): void {
   const should = target.core.logging?.shouldLogVerbose?.() ?? false;
   if (should) {
     const full = `${LOG_PREFIX} ${message}`;
     target.runtime.log?.(full);
   }
-}
-
-// ============ 工具函数 ============
-
-function normalizeWebhookPath(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return "/";
-  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  if (withSlash.length > 1 && withSlash.endsWith("/")) return withSlash.slice(0, -1);
-  return withSlash;
-}
-
-function jsonOk(res: ServerResponse, body: unknown): void {
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-
-async function readJsonBody(req: IncomingMessage, maxBytes: number) {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  return await new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve) => {
-    req.on("data", (chunk: Buffer) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        resolve({ ok: false, error: "payload too large" });
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        if (!raw.trim()) {
-          resolve({ ok: false, error: "empty payload" });
-          return;
-        }
-        resolve({ ok: true, value: JSON.parse(raw) as unknown });
-      } catch (err) {
-        resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    });
-    req.on("error", (err) => {
-      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
-    });
-  });
-}
-
-function resolvePath(req: IncomingMessage): string {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  return normalizeWebhookPath(url.pathname || "/");
-}
-
-function resolveQueryParams(req: IncomingMessage): URLSearchParams {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  return url.searchParams;
-}
-
-// 使用 secretKey 动态生成 userSig
-function generateUserSig(account: ResolvedTimbotAccount): string | undefined {
-  if (!account.sdkAppId || !account.secretKey) {
-    return undefined;
-  }
-  const identifier = account.identifier || "administrator";
-  const result = genTestUserSig({
-    userID: identifier,
-    SDKAppID: Number(account.sdkAppId),
-    SecretKey: account.secretKey,
-  });
-  return result?.userSig;
-}
-
-// 构建腾讯 IM API URL
-function buildTimbotApiUrl(account: ResolvedTimbotAccount, service: string, action: string): string {
-  const domain = account.apiDomain || "console.tim.qq.com";
-  const identifier = account.identifier || "administrator";
-  const random = Math.floor(Math.random() * 4294967295);
-  const userSig = generateUserSig(account) ?? "";
-  return `https://${domain}/v4/${service}/${action}?sdkappid=${encodeURIComponent(account.sdkAppId ?? "")}&identifier=${encodeURIComponent(identifier)}&usersig=${encodeURIComponent(userSig)}&random=${random}&contenttype=json`;
 }
 
 function resolveOutboundSenderAccount(account: ResolvedTimbotAccount): string {
@@ -165,8 +77,6 @@ function buildReplyRuntimeConfig(config: OpenClawConfig): {
   disableBlockStreaming: boolean;
 } {
   return {
-    // timbot uses typingText -> final modify for non-streaming replies, and onPartialReply
-    // for streaming replies. OpenClaw block streaming would conflict with both paths.
     config,
     disableBlockStreaming: true,
   };
@@ -406,7 +316,8 @@ function isTimStreamMode(mode: ResolvedTimbotAccount["streamingMode"]): boolean 
 
 // ============ 流式传输适配器 ============
 
-type StreamingMsgRef = { kind: "c2c"; msgKey: string } | { kind: "group"; msgSeq: number };
+/** 消息引用，用于后续 modifyMessage */
+type StreamingMsgRef = { kind: "c2c"; message: Message } | { kind: "group"; message: Message };
 
 type StreamingTransport = {
   label: string;
@@ -427,459 +338,160 @@ type StreamingTransport = {
   }) => Promise<{ ok: boolean; error?: string }>;
 };
 
-async function sendTimbotMessageBody(params: {
-  account: ResolvedTimbotAccount;
-  toAccount: string;
-  msgBody: TimbotMsgBodyElement[];
-  fromAccount?: string;
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
-  const { account, toAccount, msgBody, fromAccount, target } = params;
+// ============ SDK 消息适配 ============
 
-  // 辅助函数：根据是否有 target 选择日志方式
-  const info = (msg: string) => target ? log(target, "info", msg) : logSimple("info", msg);
-  const warn = (msg: string) => target ? log(target, "warn", msg) : logSimple("warn", msg);
-  const error = (msg: string) => target ? log(target, "error", msg) : logSimple("error", msg);
-  const verbose = (msg: string) => target ? logVerbose(target, msg) : undefined;
+/** 将 SDK Message 转换为内部格式 */
+function adaptSdkMessage(sdkMsg: Message): TimbotInboundMessage {
+  const isGroup = sdkMsg.conversationType === "GROUP";
+  const msgBody: TimbotMsgBodyElement[] = [];
 
-  verbose(`准备发送消息 -> ${toAccount}, 元素数: ${msgBody.length}`);
-
-  if (!account.configured) {
-    warn("发送失败: 账号未配置");
-    return { ok: false, error: "account not configured" };
-  }
-
-  // 验证必需参数
-  if (!account.sdkAppId || !account.secretKey) {
-    const missing: string[] = [];
-    if (!account.sdkAppId) missing.push("sdkAppId");
-    if (!account.secretKey) missing.push("secretKey");
-    error(`发送失败: 缺少必需参数: ${missing.join(", ")}`);
-    verbose(`当前账号配置: sdkAppId=${account.sdkAppId}, secretKey=${account.secretKey ? "[已配置]" : "[空]"}`);
-    return { ok: false, error: `missing required params: ${missing.join(", ")}` };
-  }
-
-  const url = buildTimbotApiUrl(account, "openim", "sendmsg");
-  const msgRandom = Math.floor(Math.random() * 4294967295);
-
-  const body: Record<string, unknown> = {
-    SyncOtherMachine: 2, // 不同步到发送方
-    To_Account: toAccount,
-    MsgRandom: msgRandom,
-    MsgBody: msgBody,
-  };
-
-  if (fromAccount) {
-    body.From_Account = fromAccount;
-  }
-
-  // verbose 级别打印完整请求信息
-  verbose(`发送请求 URL: ${url}`);
-  verbose(`发送请求 Body: ${JSON.stringify(body)}`);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+  const msgType = sdkMsg.type as string;
+  if (msgType === "TIMTextElem") {
+    msgBody.push({
+      MsgType: "TIMTextElem",
+      MsgContent: { Text: sdkMsg.payload?.text ?? "" },
     });
-
-    verbose(`HTTP 响应状态: ${response.status} ${response.statusText}`);
-    
-    const resultText = await response.text();
-    verbose(`响应内容: ${resultText}`);
-    
-    let result: TimbotSendMsgResponse;
-    try {
-      result = JSON.parse(resultText) as TimbotSendMsgResponse;
-    } catch {
-      error("响应解析失败，非 JSON 格式");
-      return { ok: false, error: `Invalid response: ${resultText.slice(0, 200)}` };
-    }
-
-    if (result.ActionStatus !== "OK") {
-      error(`发送失败: ErrorCode=${result.ErrorCode}, ErrorInfo=${result.ErrorInfo}`);
-      return { ok: false, error: result.ErrorInfo || `ErrorCode: ${result.ErrorCode}` };
-    }
-
-    info(`发送成功 -> ${toAccount}, messageId: ${result.MsgKey}`);
-    return { ok: true, messageId: result.MsgKey };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    error(`发送异常: ${errMsg}`);
-    return { ok: false, error: errMsg };
-  }
-}
-
-// 发送腾讯 IM 消息
-export async function sendTimbotMessage(params: {
-  account: ResolvedTimbotAccount;
-  toAccount: string;
-  text: string;
-  fromAccount?: string;
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
-  const { text, ...rest } = params;
-  return sendTimbotMessageBody({ ...rest, msgBody: buildTextMsgBody(text) });
-}
-
-async function sendTimbotGroupMessageBody(params: {
-  account: ResolvedTimbotAccount;
-  groupId: string;
-  msgBody: TimbotMsgBodyElement[];
-  fromAccount?: string;
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; messageId?: string; msgSeq?: number; error?: string }> {
-  const { account, groupId, msgBody, fromAccount, target } = params;
-
-  const info = (msg: string) => target ? log(target, "info", msg) : logSimple("info", msg);
-  const warn = (msg: string) => target ? log(target, "warn", msg) : logSimple("warn", msg);
-  const error = (msg: string) => target ? log(target, "error", msg) : logSimple("error", msg);
-  const verbose = (msg: string) => target ? logVerbose(target, msg) : undefined;
-
-  verbose(`准备发送群消息 -> ${groupId}, 元素数: ${msgBody.length}`);
-
-  if (!account.configured) {
-    warn("发送失败: 账号未配置");
-    return { ok: false, error: "account not configured" };
+  } else if (msgType === "TIMCustomElem") {
+    msgBody.push({
+      MsgType: "TIMCustomElem",
+      MsgContent: {
+        Data: sdkMsg.payload?.data ?? "",
+        Desc: sdkMsg.payload?.description ?? "",
+        Ext: sdkMsg.payload?.extension ?? "",
+      },
+    });
+  } else if (msgType === "TIMImageElem") {
+    msgBody.push({ MsgType: "TIMImageElem", MsgContent: {} });
+  } else if (msgType === "TIMSoundElem") {
+    msgBody.push({ MsgType: "TIMSoundElem", MsgContent: {} });
+  } else if (msgType === "TIMFileElem") {
+    msgBody.push({ MsgType: "TIMFileElem", MsgContent: {} });
+  } else if (msgType === "TIMVideoFileElem") {
+    msgBody.push({ MsgType: "TIMVideoFileElem", MsgContent: {} });
+  } else if (msgType === "TIMFaceElem") {
+    msgBody.push({ MsgType: "TIMFaceElem", MsgContent: {} });
+  } else if (msgType === "TIMLocationElem") {
+    msgBody.push({ MsgType: "TIMLocationElem", MsgContent: {} });
+  } else {
+    msgBody.push({ MsgType: msgType || "TIMUnknownElem", MsgContent: {} });
   }
 
-  if (!account.sdkAppId || !account.secretKey) {
-    const missing: string[] = [];
-    if (!account.sdkAppId) missing.push("sdkAppId");
-    if (!account.secretKey) missing.push("secretKey");
-    error(`发送失败: 缺少必需参数: ${missing.join(", ")}`);
-    return { ok: false, error: `missing required params: ${missing.join(", ")}` };
+  let groupId: string | undefined;
+  if (isGroup) {
+    groupId = sdkMsg.to;
   }
 
-  const url = buildTimbotApiUrl(account, "group_open_http_svc", "send_group_msg");
-  const msgRandom = Math.floor(Math.random() * 4294967295);
+  const atRobots: string[] = [];
+  if (Array.isArray(sdkMsg.atUserList) && sdkMsg.atUserList.length > 0) {
+    atRobots.push(...sdkMsg.atUserList);
+  }
 
-  const body: TimbotSendGroupMsgRequest = {
+  return {
+    CallbackCommand: isGroup ? "Bot.OnGroupMessage" : "Bot.OnC2CMessage",
+    From_Account: sdkMsg.from,
+    To_Account: sdkMsg.to,
+    AtRobots_Account: atRobots.length > 0 ? atRobots : undefined,
     GroupId: groupId,
-    Random: msgRandom,
+    MsgSeq: undefined,
+    MsgRandom: undefined,
+    MsgTime: sdkMsg.time,
+    MsgKey: sdkMsg.ID,
     MsgBody: msgBody,
+    CloudCustomData: sdkMsg.cloudCustomData || undefined,
   };
-
-  if (fromAccount) {
-    body.From_Account = fromAccount;
-  }
-
-  verbose(`发送群消息请求 URL: ${url}`);
-  verbose(`发送群消息请求 Body: ${JSON.stringify(body)}`);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    verbose(`HTTP 响应状态: ${response.status} ${response.statusText}`);
-
-    const resultText = await response.text();
-    verbose(`响应内容: ${resultText}`);
-
-    let result: TimbotSendMsgResponse;
-    try {
-      result = JSON.parse(resultText) as TimbotSendMsgResponse;
-    } catch {
-      error("响应解析失败，非 JSON 格式");
-      return { ok: false, error: `Invalid response: ${resultText.slice(0, 200)}` };
-    }
-
-    if (result.ActionStatus !== "OK") {
-      error(`群消息发送失败: ErrorCode=${result.ErrorCode}, ErrorInfo=${result.ErrorInfo}`);
-      return { ok: false, error: result.ErrorInfo || `ErrorCode: ${result.ErrorCode}` };
-    }
-
-    info(`群消息发送成功 -> ${groupId}, messageId: ${result.MsgKey}, msgSeq: ${result.MsgSeq}`);
-    return { ok: true, messageId: result.MsgKey, msgSeq: result.MsgSeq };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    error(`群消息发送异常: ${errMsg}`);
-    return { ok: false, error: errMsg };
-  }
 }
 
-// 发送腾讯 IM 群消息
-export async function sendTimbotGroupMessage(params: {
-  account: ResolvedTimbotAccount;
-  groupId: string;
-  text: string;
-  fromAccount?: string;
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; messageId?: string; msgSeq?: number; error?: string }> {
-  const { text, ...rest } = params;
-  return sendTimbotGroupMessageBody({ ...rest, msgBody: buildTextMsgBody(text) });
-}
+// ============ WS 消息处理 ============
 
-async function sendTimbotC2CStreamMessage(params: {
-  account: ResolvedTimbotAccount;
-  toAccount: string;
-  chunks: TimbotTimStreamChunk[];
-  compatibleText?: string;
-  streamMsgId?: string;
-  fromAccount?: string;
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; streamMsgId?: string; error?: string }> {
-  const {
-    account,
-    toAccount,
-    chunks,
-    compatibleText,
-    streamMsgId,
-    fromAccount,
-    target,
-  } = params;
+/**
+ * handleWsMessage 处理 SDK 收到的消息
+ */
+export function handleWsMessage(params: {
+  messageList: Message[];
+  target: TimbotWsTarget;
+}): void {
+  const { messageList, target } = params;
+  const outboundSender = resolveOutboundSenderAccount(target.account);
 
-  const warn = (msg: string) => target ? log(target, "warn", msg) : logSimple("warn", msg);
-  const error = (msg: string) => target ? log(target, "error", msg) : logSimple("error", msg);
-  const verbose = (msg: string) => target ? logVerbose(target, msg) : undefined;
-
-  if (!account.configured) {
-    warn("发送流式消息失败: 账号未配置");
-    return { ok: false, error: "account not configured" };
+  log(target, "info", `received ${messageList.length} message(s)`);
+  for (const m of messageList) {
+    log(target, "info", `msg: flow=${m.flow}, type=${m.type}, conv=${m.conversationType}, from=${m.from}, to=${m.to}`);
   }
 
-  if (!account.sdkAppId || !account.secretKey) {
-    const missing: string[] = [];
-    if (!account.sdkAppId) missing.push("sdkAppId");
-    if (!account.secretKey) missing.push("secretKey");
-    error(`发送流式消息失败: 缺少必需参数: ${missing.join(", ")}`);
-    return { ok: false, error: `missing required params: ${missing.join(", ")}` };
-  }
+  for (const sdkMsg of messageList) {
+    // 只处理入站消息
+    if (sdkMsg.flow !== "in") {
+      continue;
+    }
 
-  const url = buildTimbotApiUrl(account, "stream_msg", "send_c2c_stream_msg");
-  const msgRandom = Math.floor(Math.random() * 4294967295);
-  const body: Record<string, unknown> = {
-    SyncOtherMachine: 2,
-    To_Account: toAccount,
-    MsgRandom: msgRandom,
-    MsgBody: buildTimStreamMsgBody({
-      chunks,
-      compatibleText,
-      streamMsgId,
-    }),
-  };
+    // 过滤自身消息
+    if (sdkMsg.from === outboundSender || sdkMsg.from === target.account.identifier) {
+      continue;
+    }
 
-  if (fromAccount) {
-    body.From_Account = fromAccount;
-  }
+    // 过滤登录前的历史消息
+    if (sdkMsg.time < target.transport.loginTime) {
+      logVerbose(target, `skip history: msgId=${sdkMsg.ID}, time=${sdkMsg.time}, loginTime=${target.transport.loginTime}`);
+      continue;
+    }
 
-  verbose(`C2C 流式消息请求 URL: ${url}`);
-  verbose(`C2C 流式消息请求 Body: ${JSON.stringify(body)}`);
+    const msg = adaptSdkMessage(sdkMsg);
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    verbose(`C2C 流式消息 HTTP 响应状态: ${response.status} ${response.statusText}`);
-    const resultText = await response.text();
-    verbose(`C2C 流式消息响应内容: ${resultText}`);
-    let result: TimbotSendMsgResponse;
+    target.statusSink?.({ lastInboundAt: Date.now() });
+
+    const isGroup = sdkMsg.conversationType === "GROUP";
+    const isC2C = sdkMsg.conversationType === "C2C";
+
+    if (!isC2C && !isGroup) {
+      logVerbose(target, `skip non-C2C/GROUP: conversationType=${sdkMsg.conversationType}`);
+      continue;
+    }
+
+    // 获取运行时
+    let core: PluginRuntime | null = null;
     try {
-      result = JSON.parse(resultText) as TimbotSendMsgResponse;
-    } catch {
-      error("C2C 流式消息响应解析失败，非 JSON 格式");
-      return { ok: false, error: `Invalid response: ${resultText.slice(0, 200)}` };
+      core = getTimbotRuntime();
+    } catch (err) {
+      logSimple("error", `runtime not ready: ${String(err)}`);
+      continue;
     }
-    if (result.ActionStatus !== "OK") {
-      error(`C2C 流式消息发送失败: ErrorCode=${result.ErrorCode}, ErrorInfo=${result.ErrorInfo}`);
-      return { ok: false, error: result.ErrorInfo || `ErrorCode: ${result.ErrorCode}` };
+
+    if (!core) continue;
+
+    const enrichedTarget: TimbotWsTarget = { ...target, core };
+
+    if (isGroup) {
+      // 检查是否 @了机器人
+      const botAccount = target.account.botAccount;
+      const rawBody = extractTextFromMsgBody(msg.MsgBody);
+      const mentionedAccounts = [
+        ...(msg.AtRobots_Account ?? []),
+        ...extractMentionedBotAccounts(rawBody),
+      ];
+      const normalizedBotAccount = botAccount?.replace(/^＠/u, "@").toLowerCase();
+      const wasMentioned = mentionedAccounts.some(
+        (m) => m.replace(/^＠/u, "@").toLowerCase() === normalizedBotAccount,
+      );
+
+      // 也检查 atUserList
+      const wasMentionedByAtList = Array.isArray(sdkMsg.atUserList) && (
+        sdkMsg.atUserList.includes(target.account.botAccount ?? "") ||
+        sdkMsg.atUserList.includes(target.account.identifier ?? "")
+      );
+
+      if (!wasMentioned && !wasMentionedByAtList) {
+        logVerbose(target, `group msg not mentioned, skip: group=${msg.GroupId}, from=${msg.From_Account}`);
+        continue;
+      }
+
+      processGroupAndReply({ target: enrichedTarget, msg }).catch((err) => {
+        target.runtime.error?.(`[${target.account.accountId}] timbot group agent failed: ${String(err)}`);
+      });
+    } else {
+      processAndReply({ target: enrichedTarget, msg }).catch((err) => {
+        target.runtime.error?.(`[${target.account.accountId}] timbot agent failed: ${String(err)}`);
+      });
     }
-    return { ok: true, streamMsgId: result.StreamMsgID?.trim() || streamMsgId };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    error(`C2C 流式消息发送异常: ${errMsg}`);
-    return { ok: false, error: errMsg };
-  }
-}
-
-async function sendTimbotGroupStreamMessage(params: {
-  account: ResolvedTimbotAccount;
-  groupId: string;
-  chunks: TimbotTimStreamChunk[];
-  compatibleText?: string;
-  streamMsgId?: string;
-  fromAccount?: string;
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; streamMsgId?: string; error?: string }> {
-  const {
-    account,
-    groupId,
-    chunks,
-    compatibleText,
-    streamMsgId,
-    fromAccount,
-    target,
-  } = params;
-
-  const warn = (msg: string) => target ? log(target, "warn", msg) : logSimple("warn", msg);
-  const error = (msg: string) => target ? log(target, "error", msg) : logSimple("error", msg);
-  const verbose = (msg: string) => target ? logVerbose(target, msg) : undefined;
-
-  if (!account.configured) {
-    warn("发送群流式消息失败: 账号未配置");
-    return { ok: false, error: "account not configured" };
-  }
-
-  if (!account.sdkAppId || !account.secretKey) {
-    const missing: string[] = [];
-    if (!account.sdkAppId) missing.push("sdkAppId");
-    if (!account.secretKey) missing.push("secretKey");
-    error(`发送群流式消息失败: 缺少必需参数: ${missing.join(", ")}`);
-    return { ok: false, error: `missing required params: ${missing.join(", ")}` };
-  }
-
-  const url = buildTimbotApiUrl(account, "stream_msg", "send_group_stream_msg");
-  const msgRandom = Math.floor(Math.random() * 4294967295);
-  const body: Record<string, unknown> = {
-    GroupId: groupId,
-    Random: msgRandom,
-    MsgBody: buildTimStreamMsgBody({
-      chunks,
-      compatibleText,
-      streamMsgId,
-    }),
-  };
-
-  if (fromAccount) {
-    body.From_Account = fromAccount;
-  }
-
-  verbose(`群流式消息请求 URL: ${url}`);
-  verbose(`群流式消息请求 Body: ${JSON.stringify(body)}`);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    verbose(`群流式消息 HTTP 响应状态: ${response.status} ${response.statusText}`);
-    const resultText = await response.text();
-    verbose(`群流式消息响应内容: ${resultText}`);
-    let result: TimbotSendMsgResponse;
-    try {
-      result = JSON.parse(resultText) as TimbotSendMsgResponse;
-    } catch {
-      error("群流式消息响应解析失败，非 JSON 格式");
-      return { ok: false, error: `Invalid response: ${resultText.slice(0, 200)}` };
-    }
-    if (result.ActionStatus !== "OK") {
-      error(`群流式消息发送失败: ErrorCode=${result.ErrorCode}, ErrorInfo=${result.ErrorInfo}`);
-      return { ok: false, error: result.ErrorInfo || `ErrorCode: ${result.ErrorCode}` };
-    }
-    return { ok: true, streamMsgId: result.StreamMsgID?.trim() || streamMsgId };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    error(`群流式消息发送异常: ${errMsg}`);
-    return { ok: false, error: errMsg };
-  }
-}
-
-// ============ 消息修改 API ============
-
-async function modifyC2CMsg(params: {
-  account: ResolvedTimbotAccount;
-  fromAccount: string;
-  toAccount: string;
-  msgKey: string;
-  msgBody: TimbotMsgBodyElement[];
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; error?: string }> {
-  const { account, fromAccount, toAccount, msgKey, msgBody, target } = params;
-  const error = (msg: string) => target ? log(target, "error", msg) : logSimple("error", msg);
-  const verbose = (msg: string) => target ? logVerbose(target, msg) : undefined;
-
-  const url = buildTimbotApiUrl(account, "openim", "modify_c2c_msg");
-  const body = {
-    From_Account: fromAccount,
-    To_Account: toAccount,
-    MsgKey: msgKey,
-    MsgBody: msgBody,
-  };
-
-  verbose(`C2C 消息修改请求 URL: ${url}`);
-  verbose(`C2C 消息修改请求 Body: ${JSON.stringify(body)}`);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    verbose(`C2C 消息修改 HTTP 响应状态: ${response.status} ${response.statusText}`);
-    const resultText = await response.text();
-    verbose(`C2C 消息修改响应内容: ${resultText}`);
-    let result: TimbotSendMsgResponse;
-    try {
-      result = JSON.parse(resultText) as TimbotSendMsgResponse;
-    } catch {
-      error("C2C 消息修改响应解析失败，非 JSON 格式");
-      return { ok: false, error: `Invalid response: ${resultText.slice(0, 200)}` };
-    }
-    if (result.ActionStatus !== "OK") {
-      error(`C2C 消息修改失败: ErrorCode=${result.ErrorCode}, ErrorInfo=${result.ErrorInfo}`);
-      return { ok: false, error: result.ErrorInfo || `ErrorCode: ${result.ErrorCode}` };
-    }
-    return { ok: true };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    error(`C2C 消息修改异常: ${errMsg}`);
-    return { ok: false, error: errMsg };
-  }
-}
-
-async function modifyGroupMsg(params: {
-  account: ResolvedTimbotAccount;
-  groupId: string;
-  msgSeq: number;
-  msgBody: TimbotMsgBodyElement[];
-  target?: TimbotWebhookTarget;
-}): Promise<{ ok: boolean; error?: string }> {
-  const { account, groupId, msgSeq, msgBody, target } = params;
-  const error = (msg: string) => target ? log(target, "error", msg) : logSimple("error", msg);
-  const verbose = (msg: string) => target ? logVerbose(target, msg) : undefined;
-
-  const url = buildTimbotApiUrl(account, "openim", "modify_group_msg");
-  const body = {
-    GroupId: groupId,
-    MsgSeq: msgSeq,
-    MsgBody: msgBody,
-  };
-
-  verbose(`群消息修改请求 URL: ${url}`);
-  verbose(`群消息修改请求 Body: ${JSON.stringify(body)}`);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    verbose(`群消息修改 HTTP 响应状态: ${response.status} ${response.statusText}`);
-    const resultText = await response.text();
-    verbose(`群消息修改响应内容: ${resultText}`);
-    let result: TimbotSendMsgResponse;
-    try {
-      result = JSON.parse(resultText) as TimbotSendMsgResponse;
-    } catch {
-      error("群消息修改响应解析失败，非 JSON 格式");
-      return { ok: false, error: `Invalid response: ${resultText.slice(0, 200)}` };
-    }
-    if (result.ActionStatus !== "OK") {
-      error(`群消息修改失败: ErrorCode=${result.ErrorCode}, ErrorInfo=${result.ErrorInfo}`);
-      return { ok: false, error: result.ErrorInfo || `ErrorCode: ${result.ErrorCode}` };
-    }
-    return { ok: true };
-  } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    error(`群消息修改异常: ${errMsg}`);
-    return { ok: false, error: errMsg };
   }
 }
 
@@ -887,7 +499,7 @@ async function modifyGroupMsg(params: {
 
 async function executeStreamingReply(params: {
   transport: StreamingTransport;
-  target: TimbotWebhookTarget;
+  target: TimbotWsTarget;
   account: ResolvedTimbotAccount;
   core: PluginRuntime;
   config: OpenClawConfig;
@@ -1581,50 +1193,52 @@ async function executeStreamingReply(params: {
   }
 }
 
-// 处理消息并回复
+// ============ C2C 消息处理与回复 ============
+
 async function processAndReply(params: {
-  target: TimbotWebhookTarget;
+  target: TimbotWsTarget;
   msg: TimbotInboundMessage;
 }): Promise<void> {
   const { target, msg } = params;
   const core = target.core;
   const config = target.config;
   const account = target.account;
+  const wsTransport = target.transport;
 
   const fromAccount = msg.From_Account?.trim() || "unknown";
   const outboundSender = resolveOutboundSenderAccount(account);
 
   if (fromAccount === outboundSender) {
-    log(target, "info", `跳过机器人自身消息 <- ${fromAccount}`);
+    log(target, "info", `skip self message <- ${fromAccount}`);
     return;
   }
 
   const rawBody = extractTextFromMsgBody(msg.MsgBody);
 
-  log(target, "info", `收到消息 <- ${fromAccount}, msgKey: ${msg.MsgKey}`);
-  logVerbose(target, `消息内容: ${rawBody.slice(0, 200)}${rawBody.length > 200 ? "..." : ""}`);
+  log(target, "info", `C2C message <- ${fromAccount}, msgKey=${msg.MsgKey}`);
+  logVerbose(target, `content: ${rawBody.slice(0, 200)}${rawBody.length > 200 ? "..." : ""}`);
 
   if (!rawBody.trim()) {
-    log(target, "warn", "消息内容为空，跳过处理");
+    log(target, "warn", "empty message, skip");
     return;
   }
 
-  // 过滤纯占位符消息（如 [custom]、[image] 等），这些通常是系统消息或输入状态
-  if (/^\[.+\]$/.test(rawBody.trim())) {
-    logVerbose(target, `占位符消息，跳过处理: ${rawBody} (from: ${fromAccount})`);
+  // 过滤占位符消息，但保留 TUIEmoji 表情
+  if (/^\[.+\]$/.test(rawBody.trim()) && !/^\[TUIEmoji_/i.test(rawBody.trim())) {
+    logVerbose(target, `placeholder message, skip: ${rawBody} (from: ${fromAccount})`);
     return;
   }
 
-  logVerbose(target, `开始处理消息, 账号: ${account.accountId}`);
+  logVerbose(target, `processing, account=${account.accountId}`);
 
   const route = core.channel.routing.resolveAgentRoute({
     cfg: config,
-    channel: "timbot",
+    channel: "timbot-ws",
     accountId: account.accountId,
     peer: { kind: "dm", id: fromAccount },
   });
 
-  logVerbose(target, `processing message from ${fromAccount}, agentId=${route.agentId}`);
+  logVerbose(target, `route: agentId=${route.agentId}`);
 
   const fromLabel = `user:${fromAccount}`;
   const storePath = core.channel.session.resolveStorePath(config.session?.store, {
@@ -1655,10 +1269,10 @@ async function processAndReply(params: {
     ConversationLabel: fromLabel,
     SenderName: fromAccount,
     SenderId: fromAccount,
-    Provider: "timbot",
-    Surface: "timbot",
+    Provider: "timbot-ws",
+    Surface: "timbot-ws",
     MessageSid: msg.MsgKey,
-    OriginatingChannel: "timbot",
+    OriginatingChannel: "timbot-ws",
     OriginatingTo: `timbot:${fromAccount}`,
   });
 
@@ -1673,61 +1287,62 @@ async function processAndReply(params: {
 
   const tableMode = core.channel.text.resolveMarkdownTableMode({
     cfg: config,
-    channel: "timbot",
+    channel: "timbot-ws",
     accountId: account.accountId,
   });
-  const finalTextChunkLimit = core.channel.text.resolveTextChunkLimit(config, "timbot", account.accountId, {
+  const finalTextChunkLimit = core.channel.text.resolveTextChunkLimit(config, "timbot-ws", account.accountId, {
     fallbackLimit: TIMBOT_FINAL_TEXT_CHUNK_LIMIT,
   });
   const splitFinalText = (text: string) => splitTextByFixedLength(text, finalTextChunkLimit);
 
-  logVerbose(target, `开始生成回复 -> ${fromAccount}`);
-  logVerbose(target, `转发给 OpenClaw: RawBody=${rawBody.slice(0, 100)}, SessionKey=${ctxPayload.SessionKey}, From=${ctxPayload.From}`);
+  logVerbose(target, `generating reply -> ${fromAccount}`);
+  logVerbose(target, `dispatch: sessionKey=${ctxPayload.SessionKey}, from=${ctxPayload.From}`);
 
-  // C2C 传输适配器
   const transport: StreamingTransport = {
     label: "",
-    sendStreamMsg: (p) =>
-      sendTimbotC2CStreamMessage({
-        account,
-        toAccount: fromAccount,
-        fromAccount: outboundSender,
-        target,
-        ...p,
-      }),
-    modifyMsg: (p) => {
-      const ref = p.ref as { kind: "c2c"; msgKey: string };
-      return modifyC2CMsg({
-        account,
-        fromAccount: outboundSender,
-        toAccount: fromAccount,
-        msgKey: ref.msgKey,
-        msgBody: p.msgBody,
-        target,
-      });
+    sendStreamMsg: async (_p) => {
+      return { ok: false, error: "tim_stream not supported via SDK WebSocket" };
+    },
+    modifyMsg: async (p) => {
+      const ref = p.ref as { kind: "c2c"; message: Message };
+      const elem = p.msgBody[0];
+      let newPayload: { text: string } | { data: string; description?: string };
+      if (elem?.MsgType === "TIMCustomElem") {
+        newPayload = { data: elem.MsgContent.Data ?? JSON.stringify(elem.MsgContent), description: elem.MsgContent.Desc };
+      } else {
+        newPayload = { text: elem?.MsgContent?.Text ?? "" };
+      }
+      const result = await wsTransport.modifyMessage(ref.message, newPayload);
+      if (result.ok && result.message) {
+        ref.message = result.message;
+      }
+      return { ok: result.ok, error: result.error };
     },
     sendMsgBody: async (p) => {
-      const result = await sendTimbotMessageBody({
-        account,
-        toAccount: fromAccount,
-        msgBody: p.msgBody,
-        fromAccount: outboundSender,
-        target,
-      });
+      const elem = p.msgBody[0];
+      let result;
+      if (elem?.MsgType === "TIMCustomElem") {
+        result = await wsTransport.sendC2CCustomMessage(
+          fromAccount,
+          elem.MsgContent.Data ?? JSON.stringify(elem.MsgContent),
+          elem.MsgContent.Desc,
+        );
+      } else {
+        result = await wsTransport.sendC2CTextMessage(
+          fromAccount,
+          elem?.MsgContent?.Text ?? "",
+        );
+      }
       return {
         ok: result.ok,
-        ref: result.messageId ? { kind: "c2c" as const, msgKey: result.messageId } : undefined,
+        ref: result.message ? { kind: "c2c" as const, message: result.message } : undefined,
         error: result.error,
       };
     },
-    sendText: (p) =>
-      sendTimbotMessage({
-        account,
-        toAccount: fromAccount,
-        text: p.text,
-        fromAccount: outboundSender,
-        target,
-      }),
+    sendText: async (p) => {
+      const result = await wsTransport.sendC2CTextMessage(fromAccount, p.text);
+      return { ok: result.ok, error: result.error };
+    },
   };
 
   const streamingMode = account.streamingMode;
@@ -1754,53 +1369,55 @@ async function processAndReply(params: {
     hasTypingText: Boolean((account.config.typingText ?? "正在思考中...").trim()),
   });
 
-  log(target, "info", `消息处理完成 <- ${fromAccount}`);
+  log(target, "info", `C2C done <- ${fromAccount}`);
 }
 
-// 处理群聊消息并回复
+// ============ 群聊消息处理与回复 ============
+
 async function processGroupAndReply(params: {
-  target: TimbotWebhookTarget;
+  target: TimbotWsTarget;
   msg: TimbotInboundMessage;
 }): Promise<void> {
   const { target, msg } = params;
   const core = target.core;
   const config = target.config;
   const account = target.account;
+  const wsTransport = target.transport;
 
   const groupId = msg.GroupId?.trim() || "unknown";
   const fromAccount = msg.From_Account?.trim() || "unknown";
   const outboundSender = resolveOutboundSenderAccount(account);
 
   if (fromAccount === outboundSender) {
-    log(target, "info", `跳过机器人自身消息 <- group:${groupId}, from: ${fromAccount}`);
+    log(target, "info", `skip self message <- group:${groupId}, from=${fromAccount}`);
     return;
   }
 
   const rawBody = extractTextFromMsgBody(msg.MsgBody);
 
-  log(target, "info", `收到群消息 <- group:${groupId}, from: ${fromAccount}, msgSeq: ${msg.MsgSeq}`);
-  logVerbose(target, `群消息内容: ${rawBody.slice(0, 200)}${rawBody.length > 200 ? "..." : ""}`);
+  log(target, "info", `group message <- group:${groupId}, from=${fromAccount}, msgId=${msg.MsgKey}`);
+  logVerbose(target, `content: ${rawBody.slice(0, 200)}${rawBody.length > 200 ? "..." : ""}`);
 
   if (!rawBody.trim()) {
-    log(target, "warn", "群消息内容为空，跳过处理");
+    log(target, "warn", "empty group message, skip");
     return;
   }
 
-  if (/^\[.+\]$/.test(rawBody.trim())) {
-    logVerbose(target, `群占位符消息，跳过处理: ${rawBody} (group: ${groupId}, from: ${fromAccount})`);
+  if (/^\[.+\]$/.test(rawBody.trim()) && !/^\[TUIEmoji_/i.test(rawBody.trim())) {
+    logVerbose(target, `placeholder message, skip: ${rawBody} (group=${groupId}, from=${fromAccount})`);
     return;
   }
 
-  logVerbose(target, `开始处理群消息, 账号: ${account.accountId}, group: ${groupId}`);
+  logVerbose(target, `processing group message, account=${account.accountId}, group=${groupId}`);
 
   const route = core.channel.routing.resolveAgentRoute({
     cfg: config,
-    channel: "timbot",
+    channel: "timbot-ws",
     accountId: account.accountId,
     peer: { kind: "group", id: groupId },
   });
 
-  logVerbose(target, `processing group message from ${fromAccount} in ${groupId}, agentId=${route.agentId}`);
+  logVerbose(target, `route: agentId=${route.agentId}, group=${groupId}`);
 
   const groupLabel = `group:${groupId}`;
   const senderLabel = `user:${fromAccount}`;
@@ -1832,13 +1449,13 @@ async function processGroupAndReply(params: {
     AccountId: route.accountId,
     ChatType: "group",
     ConversationLabel: groupLabel,
-    GroupSubject: msg.GroupName || undefined,
+    GroupSubject: undefined,
     SenderName: fromAccount,
     SenderId: fromAccount,
-    Provider: "timbot",
-    Surface: "timbot",
+    Provider: "timbot-ws",
+    Surface: "timbot-ws",
     MessageSid: msg.MsgKey ?? String(msg.MsgSeq ?? ""),
-    OriginatingChannel: "timbot",
+    OriginatingChannel: "timbot-ws",
     OriginatingTo: `timbot:group:${groupId}`,
     WasMentioned: true,
   });
@@ -1854,59 +1471,62 @@ async function processGroupAndReply(params: {
 
   const tableMode = core.channel.text.resolveMarkdownTableMode({
     cfg: config,
-    channel: "timbot",
+    channel: "timbot-ws",
     accountId: account.accountId,
   });
-  const finalTextChunkLimit = core.channel.text.resolveTextChunkLimit(config, "timbot", account.accountId, {
+  const finalTextChunkLimit = core.channel.text.resolveTextChunkLimit(config, "timbot-ws", account.accountId, {
     fallbackLimit: TIMBOT_FINAL_TEXT_CHUNK_LIMIT,
   });
   const splitFinalText = (text: string) => splitTextByFixedLength(text, finalTextChunkLimit);
 
-  logVerbose(target, `开始生成群回复 -> group:${groupId}`);
+  logVerbose(target, `generating reply -> group:${groupId}`);
 
   // Group 传输适配器
   const transport: StreamingTransport = {
     label: "群",
-    sendStreamMsg: (p) =>
-      sendTimbotGroupStreamMessage({
-        account,
-        groupId,
-        fromAccount: outboundSender,
-        target,
-        ...p,
-      }),
-    modifyMsg: (p) => {
-      const ref = p.ref as { kind: "group"; msgSeq: number };
-      return modifyGroupMsg({
-        account,
-        groupId,
-        msgSeq: ref.msgSeq,
-        msgBody: p.msgBody,
-        target,
-      });
+    sendStreamMsg: async (_p) => {
+      return { ok: false, error: "tim_stream not supported via SDK WebSocket" };
+    },
+    modifyMsg: async (p) => {
+      const ref = p.ref as { kind: "group"; message: Message };
+      const elem = p.msgBody[0];
+      let newPayload: { text: string } | { data: string; description?: string };
+      if (elem?.MsgType === "TIMCustomElem") {
+        newPayload = { data: elem.MsgContent.Data ?? JSON.stringify(elem.MsgContent), description: elem.MsgContent.Desc };
+      } else {
+        newPayload = { text: elem?.MsgContent?.Text ?? "" };
+      }
+      const result = await wsTransport.modifyMessage(ref.message, newPayload);
+      if (result.ok && result.message) {
+        ref.message = result.message;
+      }
+      return { ok: result.ok, error: result.error };
     },
     sendMsgBody: async (p) => {
-      const result = await sendTimbotGroupMessageBody({
-        account,
-        groupId,
-        msgBody: p.msgBody,
-        fromAccount: outboundSender,
-        target,
-      });
+      const elem = p.msgBody[0];
+      let result;
+      if (elem?.MsgType === "TIMCustomElem") {
+        result = await wsTransport.sendGroupCustomMessage(
+          groupId,
+          elem.MsgContent.Data ?? JSON.stringify(elem.MsgContent),
+          elem.MsgContent.Desc,
+        );
+      } else {
+        result = await wsTransport.sendGroupTextMessage(
+          groupId,
+          elem?.MsgContent?.Text ?? "",
+        );
+      }
       return {
         ok: result.ok,
-        ref: result.msgSeq != null ? { kind: "group" as const, msgSeq: result.msgSeq } : undefined,
+        ref: result.message ? { kind: "group" as const, message: result.message } : undefined,
         error: result.error,
       };
     },
-    sendText: (p) =>
-      sendTimbotGroupMessage({
-        account,
-        groupId,
-        text: p.text,
-        fromAccount: outboundSender,
-        target,
-      }),
+    sendText: async (p) => {
+      const result = await wsTransport.sendGroupTextMessage(groupId, p.text);
+      return { ok: result.ok, error: result.error };
+    },
   };
 
   const streamingMode = account.streamingMode;
@@ -1933,157 +1553,51 @@ async function processGroupAndReply(params: {
     hasTypingText: Boolean((account.config.typingText ?? "正在思考中...").trim()),
   });
 
-  log(target, "info", `群消息处理完成 <- group:${groupId}, from: ${fromAccount}`);
+  log(target, "info", `group done <- group:${groupId}, from=${fromAccount}`);
 }
 
-export function registerTimbotWebhookTarget(target: TimbotWebhookTarget): () => void {
-  const key = normalizeWebhookPath(target.path);
-  const normalizedTarget = { ...target, path: key };
-  const existing = webhookTargets.get(key) ?? [];
-  const next = [...existing, normalizedTarget];
-  webhookTargets.set(key, next);
+// ============ WS Target 注册 / 注销 ============
+
+export function registerWsTarget(target: TimbotWsTarget): () => void {
+  const key = target.account.accountId;
+  const existing = wsTargets.get(key) ?? [];
+  const next = [...existing, target];
+  wsTargets.set(key, next);
   return () => {
-    const updated = (webhookTargets.get(key) ?? []).filter((entry) => entry !== normalizedTarget);
-    if (updated.length > 0) webhookTargets.set(key, updated);
-    else webhookTargets.delete(key);
+    const updated = (wsTargets.get(key) ?? []).filter((entry) => entry !== target);
+    if (updated.length > 0) wsTargets.set(key, updated);
+    else wsTargets.delete(key);
   };
 }
 
-export async function handleTimbotWebhookRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-): Promise<boolean> {
-  const path = resolvePath(req);
-  const targets = webhookTargets.get(path);
-  if (!targets || targets.length === 0) return false;
+// ============ 外部暴露的发送函数（供 channel.ts outbound 使用） ============
 
-  // 只处理 POST 请求
-  if (req.method !== "POST") {
-    logSimple("warn", `收到非 POST 请求: ${req.method} ${path}`);
-    res.statusCode = 405;
-    res.setHeader("Allow", "POST");
-    res.end("Method Not Allowed");
-    return true;
-  }
-
-  const query = resolveQueryParams(req);
-  const sdkAppId = query.get("SdkAppid") ?? query.get("sdkappid") ?? "";
-  const sign = query.get("Sign") ?? query.get("sign") ?? "";
-  const requestTime = query.get("RequestTime") ?? query.get("requesttime") ?? "";
-
-  logSimple("info", `收到 webhook 请求: ${path}`);
-
-  // 读取请求体
-  const bodyResult = await readJsonBody(req, 1024 * 1024);
-  if (!bodyResult.ok) {
-    logSimple("error", `请求体读取失败: ${bodyResult.error}`);
-    res.statusCode = bodyResult.error === "payload too large" ? 413 : 400;
-    res.end(bodyResult.error ?? "invalid payload");
-    return true;
-  }
-
-  const msg = bodyResult.value as TimbotInboundMessage;
-  logSimple("info", `webhook 消息详情: callback=${msg.CallbackCommand || "-"}, To_Account=${msg.To_Account || "-"}, AtRobots_Account=${JSON.stringify(msg.AtRobots_Account ?? [])}, From_Account=${msg.From_Account || "-"}, GroupId=${msg.GroupId || "-"}`);
-  const sdkMatchedTargets = matchTimbotWebhookTargetsBySdkAppId(targets, sdkAppId);
-  let target = selectTimbotWebhookTarget({ targets: sdkMatchedTargets, msg });
-  if (!target && sdkMatchedTargets.length === 1) {
-    target = sdkMatchedTargets[0];
-  }
-
-  // 签名验证
-  const signatureTargets = (target ? [target] : sdkMatchedTargets)
-    .filter((candidate) => candidate.account.configured && candidate.account.token);
-  if (signatureTargets.length > 0) {
-    // 1. 超时校验：RequestTime 与当前时间相差超过 60 秒则拒绝
-    const requestTimestamp = parseInt(requestTime, 10);
-    const nowTimestamp = Math.floor(Date.now() / 1000);
-    const timeDiff = Math.abs(nowTimestamp - requestTimestamp);
-    if (isNaN(requestTimestamp) || timeDiff > 60) {
-      logSimple("error", `请求超时: RequestTime=${requestTime}, 当前时间=${nowTimestamp}, 差值=${timeDiff}s`);
-      res.statusCode = 403;
-      res.end("Request timeout");
-      return true;
-    }
-
-    // 2. 签名校验：sha256(token + requestTime)
-    const verifiedTargets = signatureTargets.filter((candidate) => {
-      const expectedSign = createHash("sha256")
-        .update(candidate.account.token + requestTime)
-        .digest("hex");
-      return (
-        sign.length === expectedSign.length
-        && timingSafeEqual(Buffer.from(sign), Buffer.from(expectedSign))
-      );
-    });
-    if (verifiedTargets.length === 0) {
-      const expectedSign = createHash("sha256")
-        .update(signatureTargets[0]!.account.token + requestTime)
-        .digest("hex");
-      logSimple("error", `签名验证失败: 收到=${sign.slice(0, 16)}..., 预期=${expectedSign.slice(0, 16)}...`);
-      res.statusCode = 403;
-      res.end("Signature verification failed");
-      return true;
-    }
-    if (!target && verifiedTargets.length === 1) {
-      target = verifiedTargets[0];
-    }
-  }
-
+export async function sendTimbotMessage(params: {
+  account: ResolvedTimbotAccount;
+  toAccount: string;
+  text: string;
+  fromAccount?: string;
+}): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const targets = wsTargets.get(params.account.accountId);
+  const target = targets?.[0];
   if (!target) {
-    const callbackCommand = msg.CallbackCommand ?? "";
-    const mentions = extractMentionedBotAccounts(extractTextFromMsgBody(msg.MsgBody));
-    logSimple(
-      "warn",
-      `未能唯一匹配 webhook 账号，跳过处理: callback=${callbackCommand || "-"}, sdkAppId=${sdkAppId || "-"}, to=${msg.To_Account?.trim() || "-"}, group=${msg.GroupId?.trim() || "-"}, mentions=${mentions.join(",") || "-"}`,
-    );
-    jsonOk(res, { ActionStatus: "OK", ErrorCode: 0, ErrorInfo: "" });
-    return true;
+    return { ok: false, error: "no active WS transport for this account" };
   }
+  const result = await target.transport.sendC2CTextMessage(params.toAccount, params.text);
+  return { ok: result.ok, messageId: result.message?.ID, error: result.error };
+}
 
-  if (!target.account.configured) {
-    logSimple("warn", `账号 ${target.account.accountId} 未配置，跳过处理`);
-    // 即使未配置也返回成功，避免腾讯 IM 重试
-    jsonOk(res, { ActionStatus: "OK", ErrorCode: 0, ErrorInfo: "" });
-    return true;
+export async function sendTimbotGroupMessage(params: {
+  account: ResolvedTimbotAccount;
+  groupId: string;
+  text: string;
+  fromAccount?: string;
+}): Promise<{ ok: boolean; messageId?: string; msgSeq?: number; error?: string }> {
+  const targets = wsTargets.get(params.account.accountId);
+  const target = targets?.[0];
+  if (!target) {
+    return { ok: false, error: "no active WS transport for this account" };
   }
-
-  target.statusSink?.({ lastInboundAt: Date.now() });
-  logSimple("info", `匹配到账号: ${target.account.accountId}, botAccount=${target.account.botAccount || "-"}`);
-
-  const callbackCommand = msg.CallbackCommand ?? "";
-
-  // 立即返回成功响应给腾讯 IM
-  jsonOk(res, { ActionStatus: "OK", ErrorCode: 0, ErrorInfo: "" });
-
-  // 只处理机器人消息回调（C2C 单聊 + 群聊）
-  const isC2C = callbackCommand === "Bot.OnC2CMessage";
-  const isGroup = callbackCommand === "Bot.OnGroupMessage";
-  if (!isC2C && !isGroup) {
-    logSimple("info", `非 Bot 消息回调，跳过: ${callbackCommand}`);
-    return true;
-  }
-
-  // 获取运行时并异步处理消息
-  let core: PluginRuntime | null = null;
-  try {
-    core = getTimbotRuntime();
-  } catch (err) {
-    logSimple("error", `运行时未就绪: ${String(err)}`);
-    return true;
-  }
-
-  if (core) {
-    const enrichedTarget: TimbotWebhookTarget = { ...target, core };
-    if (isGroup) {
-      processGroupAndReply({ target: enrichedTarget, msg }).catch((err) => {
-        target.runtime.error?.(`[${target.account.accountId}] timbot group agent failed: ${String(err)}`);
-      });
-    } else {
-      processAndReply({ target: enrichedTarget, msg }).catch((err) => {
-        target.runtime.error?.(`[${target.account.accountId}] timbot agent failed: ${String(err)}`);
-      });
-    }
-  }
-
-  return true;
+  const result = await target.transport.sendGroupTextMessage(params.groupId, params.text);
+  return { ok: result.ok, messageId: result.message?.ID, error: result.error };
 }

@@ -1,10 +1,28 @@
-# OpenClaw 腾讯云 IM 通道插件
+# timbot-ws - OpenClaw 腾讯云 IM 通道插件（WebSocket 版）
 
-维护者：longyuqi@tencent.com
+维护者：leochliu@tencent.com
 
-支持腾讯云即时通信 IM 智能机器人，通过 Webhook 回调 + REST API 实现。
+通过 WebSocket SDK 实现腾讯云即时通信 IM 智能机器人。
+
+**✨ 无需公网 IP，零配置部署，开箱即用。**
 
 完整接入教程请参考：**[腾讯云官方文档](https://cloud.tencent.com/document/product/269/128326)**
+
+---
+
+## 与 timbot（Webhook 版）的区别
+
+| 特性 | timbot-ws (WebSocket) | timbot (Webhook) |
+|------|----------------------|------------------|
+| **部署要求** | 无需公网 IP | 需要公网 IP + HTTPS |
+| **连接方式** | 长连接，主动连接腾讯 IM | 被动接收 Webhook 回调 |
+| **适用场景** | 本地开发、内网部署、快速原型 | 生产环境、高并发、多实例 |
+| **Multi-Agent** | 🚧 暂不支持单机器人多 Agent | ✅ 支持 |
+| **流式消息** | ⚠️ 部分支持（text_modify/custom_modify） | ✅ 完整支持（含原生 TIMStreamElem） |
+
+> ⚠️ **注意**：timbot-ws 当前不支持单机器人的 multi-agent 模式，如需此功能请使用 timbot（Webhook 版）。详见 [限制说明](#限制说明)。
+
+---
 
 ## 安装
 
@@ -71,7 +89,7 @@ bash install-timbot.sh
 - **不确定 / 刚开始接入** → `off`（默认），最稳定，所有客户端都能正常展示。
 - **希望有"正在输入"体验，且使用官方客户端** → `text_modify`，兼容性最好，各端（Web、Android、iOS、小程序、桌面）都能看到消息被持续更新。
 - **自研前端，需要自定义渲染逻辑** → `custom_modify`，拥有更细致的控制能力，通过 `TIMCustomElem` 传递结构化数据，前端自行解析渲染。
-- **想用腾讯云原生流式能力（`TIMStreamElem`）** → `tim_stream`，需确认客户端已支持该消息类型，否则只能看到 CompatibleText。
+- ~~**想用腾讯云原生流式能力（`TIMStreamElem`）** → `tim_stream`~~ **⚠️ timbot-ws 不支持**：IM Node SDK 不支持发送流式消息，如需此功能请使用 timbot（Webhook 版）。
 
 注意：以上三种“流式模式”只决定 TIM 侧的消息承载方式，不保证上游模型一定会逐块输出。前提是所选 provider/model 能在 OpenClaw 中产生 partial 文本（`onPartialReply`）。如果上游只在结束时返回 final，TIM 侧会表现为「占位消息 -> 最终替换」，不会看到逐字增长。
 
@@ -430,3 +448,25 @@ openclaw models set openai/gpt-4.1
 # 查看当前默认模型与认证状态
 openclaw models status
 ```
+
+---
+
+## 限制说明
+
+### tim_stream 模式不支持
+
+timbot-ws 的 `tim_stream` 模式（原生 `TIMStreamElem` 流式消息）**不可用**。
+
+**原因**：腾讯 IM Node SDK 目前不支持发送流式消息（`TIMStreamElem`），该功能只能通过服务端 REST API 实现。
+
+**可用的流式模式**：
+| 模式 | 可用性 | 说明 |
+|------|--------|------|
+| `off` | ✅ | 关闭流式，一次性发送最终消息 |
+| `text_modify` | ✅ | 通过修改文本消息实现打字机效果 |
+| `custom_modify` | ✅ | 通过修改自定义消息实现，前端自行渲染 |
+| `tim_stream` | ❌ | SDK 不支持，请使用 timbot（Webhook 版） |
+
+### 单机器人 Multi-Agent 不支持
+
+timbot-ws 当前**不支持单机器人的 multi-agent 模式**。
