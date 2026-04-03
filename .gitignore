@@ -12,7 +12,6 @@ node_modules
 package-lock.json
 dist
 
-.claude-internal
-.claude-bak
+dev-install.sh
 
 im-node-sdk-dist

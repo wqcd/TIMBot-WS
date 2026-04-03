@@ -142,7 +142,7 @@ pnpm build
 pnpm test
 
 # 本地安装（link 模式）
-bash install-timbot.sh
+bash install-timbot-ws.sh
 
 # 卸载
 bash uninstall-timbot.sh

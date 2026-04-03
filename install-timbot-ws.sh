@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "=== Installing openclaw plugin: timbot ==="
+echo "=== Installing openclaw plugin: timbot-ws ==="
 
 # Step 1: Build
 echo "[1/2] Building..."

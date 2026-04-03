@@ -1,17 +1,17 @@
 {
   "name": "timbot-ws",
-  "version": "2026.4.3",
+  "version": "2026.4.3-beta.1",
   "type": "module",
   "description": "OpenClaw Tencent Cloud IM intelligent bot channel plugin via WebSocket SDK",
   "author": "longyuqi@tencent.com",
   "license": "MIT",
-  "homepage": "https://github.com/Rychou/timbot-ws#readme",
+  "homepage": "https://github.com/Tencent-RTC/TIMBot-WS#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Rychou/timbot-ws.git"
+    "url": "git+https://github.com/Tencent-RTC/TIMBot-WS.git"
   },
   "bugs": {
-    "url": "https://github.com/Rychou/timbot-ws/issues"
+    "url": "https://github.com/Tencent-RTC/TIMBot-WS/issues"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -30,6 +30,7 @@
   ],
   "scripts": {
     "build": "tsc && mkdir -p dist/src/debug && cp src/debug/GenerateTestUserSig-es.js src/debug/lib-generate-test-usersig-es.min.js dist/src/debug/ && mkdir -p dist/im-sdk-bundle && cp -rf ./im-node-sdk-dist/* dist/im-sdk-bundle/",
+    "prepack": "pnpm build",
     "postinstall": "cp -rf ./im-node-sdk-dist/* ./node_modules/@tencentcloud/lite-chat/ 2>/dev/null; find ./node_modules/.pnpm -path '*/@tencentcloud/lite-chat' -type d -exec cp -rf ./im-node-sdk-dist/* {} \\; 2>/dev/null; true",
     "test": "pnpm build && node --test test/*.test.mjs"
   },

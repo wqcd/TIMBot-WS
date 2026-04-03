@@ -15,7 +15,7 @@
 pnpm build && pnpm publish --tag beta --access public --no-git-checks
 ```
 
-安装 beta 版本: `openclaw plugins install timbot@beta`
+安装 beta 版本: `openclaw plugins install timbot-ws@beta`
 
 ### 正式版本
 
@@ -25,7 +25,7 @@ pnpm build && pnpm publish --tag beta --access public --no-git-checks
 pnpm build && pnpm publish --access public --no-git-checks
 ```
 
-安装正式版本: `openclaw plugins install timbot`
+安装正式版本: `openclaw plugins install timbot-ws`
 
 ## 本地开发
 
@@ -34,9 +34,9 @@ pnpm build && pnpm publish --access public --no-git-checks
 bash uninstall-timbot.sh
 
 # 构建 + 安装（link 模式）
-bash install-timbot.sh
+bash install-timbot-ws.sh
 
-# 测试 onboarding
+# 测试 setup wizard
 openclaw channels add
 ```
 

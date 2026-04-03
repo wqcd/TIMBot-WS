@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLUGIN_ID="timbot"
+PLUGIN_ID="timbot-ws"
 OPENCLAW_DIR="$HOME/.openclaw"
 CONFIG_FILE="$OPENCLAW_DIR/openclaw.json"
 EXTENSION_DIR="$OPENCLAW_DIR/extensions/$PLUGIN_ID"
