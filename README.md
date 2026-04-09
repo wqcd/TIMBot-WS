@@ -48,6 +48,10 @@ bash install-timbot-ws.sh
 
 ## Changelog
 
+### 2026.4.8
+
+- fix: 修复 openclaw 新版本安装失败问题， 限制 openclaw 最低支持版本为 v2026.3.24
+
 ### 2026.4.2
 
 - feat: 支持图片/文件消息

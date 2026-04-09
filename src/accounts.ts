@@ -69,10 +69,8 @@ export function resolveTimbotAccount(params: {
 
   // 从合并后的配置中提取字段
   const sdkAppId = merged.sdkAppId?.trim() || undefined;
-  const identifier = merged.identifier?.trim() || undefined;
-  const userId = merged.userId?.trim() || identifier || undefined;
+  const userId = merged.userId?.trim() || undefined;
   const userSig = merged.userSig?.trim() || undefined;
-  const botAccount = merged.botAccount?.trim() || undefined;
   const streamingMode: TimbotStreamingMode =
     merged.streamingMode === "custom_modify"
       ? "custom_modify"
@@ -110,10 +108,8 @@ export function resolveTimbotAccount(params: {
     enabled,
     configured,
     sdkAppId,
-    identifier,
     userId,
     userSig,
-    botAccount,
     streamingMode,
     fallbackPolicy,
     overflowPolicy,

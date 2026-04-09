@@ -49,8 +49,6 @@ All options are under `channels.timbot-ws` in the OpenClaw config.
 | `sdkAppId` | Yes | Tencent Cloud IM SDK App ID | — |
 | `userId` | Yes | Bot login UserID (the identity that sends/receives messages) | — |
 | `userSig` | Yes | User signature for SDK login authentication | — |
-| `identifier` | No | Identity for API calls (falls back to `userId` if not set) | — |
-| `botAccount` | No | Bot account ID (falls back to `userId` if not set) | — |
 | `enabled` | No | Enable/disable this channel | `true` |
 
 > **About UserSig**: Recommended validity period is 10 years (315360000 seconds). Generate it from the Tencent IM Console under "Development Tools > UserSig Generation". If leaked, you can revoke it via REST API to invalidate it immediately. See [UserSig Documentation](https://cloud.tencent.com/document/product/269/32688).

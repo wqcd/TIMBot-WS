@@ -70,7 +70,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
       deleteAccountFromConfigSection({
         cfg: cfg as OpenClawConfig,
         sectionKey: "timbot-ws",
-        clearBaseFields: ["name", "sdkAppId", "identifier", "userId", "userSig", "botAccount", "welcomeText", "typingText", "streamingMode", "fallbackPolicy", "overflowPolicy"],
+        clearBaseFields: ["name", "sdkAppId", "userId", "userSig", "welcomeText", "typingText", "streamingMode", "fallbackPolicy", "overflowPolicy"],
         accountId,
       }),
     isConfigured: (account) => account.configured,
@@ -133,7 +133,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
           account,
           groupId,
           text,
-          fromAccount: account.botAccount,
+          fromAccount: account.userId,
         });
         return {
           channel: "timbot-ws",
@@ -147,7 +147,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
         account,
         toAccount: target,
         text,
-        fromAccount: account.botAccount,
+        fromAccount: account.userId,
       });
 
       return {
@@ -162,6 +162,8 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
     defaultRuntime: {
       accountId: DEFAULT_ACCOUNT_ID,
       running: false,
+      connected: false,
+      lastConnectedAt: null,
       lastStartAt: null,
       lastStopAt: null,
       lastError: null,
@@ -169,6 +171,8 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
     buildChannelSummary: ({ snapshot }) => ({
       configured: snapshot.configured ?? false,
       running: snapshot.running ?? false,
+      connected: snapshot.connected ?? false,
+      lastConnectedAt: snapshot.lastConnectedAt ?? null,
       lastStartAt: snapshot.lastStartAt ?? null,
       lastStopAt: snapshot.lastStopAt ?? null,
       lastError: snapshot.lastError ?? null,
@@ -184,6 +188,8 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
       enabled: account.enabled,
       configured: account.configured,
       running: runtime?.running ?? false,
+      connected: runtime?.connected ?? false,
+      lastConnectedAt: runtime?.lastConnectedAt ?? null,
       lastStartAt: runtime?.lastStartAt ?? null,
       lastStopAt: runtime?.lastStopAt ?? null,
       lastError: runtime?.lastError ?? null,
@@ -197,27 +203,27 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
       const account = ctx.account;
 
       ctx.log?.debug(`starting account: ${account.accountId}, configured=${account.configured}, enabled=${account.enabled}`);
-      ctx.log?.debug(`sdkAppId=${account.sdkAppId ?? "unset"}, userId=${account.userId ?? account.identifier ?? "unset"}, userSig=${account.userSig ? "set" : "unset"}`);
+      ctx.log?.debug(`sdkAppId=${account.sdkAppId ?? "unset"}, userId=${account.userId ?? "unset"}, userSig=${account.userSig ? "set" : "unset"}`);
 
       if (!account.configured) {
         ctx.log?.warn(`[${account.accountId}] not configured, skipping`);
-        ctx.setStatus({ accountId: account.accountId, running: false, configured: false });
+        ctx.setStatus({ accountId: account.accountId, running: false, connected: false, configured: false });
         return;
       }
 
       const sdkAppId = Number(account.sdkAppId);
       if (!sdkAppId || isNaN(sdkAppId)) {
         ctx.log?.warn(`[${account.accountId}] invalid sdkAppId: ${account.sdkAppId}`);
-        ctx.setStatus({ accountId: account.accountId, running: false, configured: false, lastError: "invalid sdkAppId" });
+        ctx.setStatus({ accountId: account.accountId, running: false, connected: false, configured: false, lastError: "invalid sdkAppId" });
         return;
       }
 
-      const userID = account.userId || account.identifier || account.botAccount || "administrator";
+      const userID = account.userId || "administrator";
       const userSig = account.userSig;
 
       if (!userSig) {
         ctx.log?.error(`[${account.accountId}] userSig required`);
-        ctx.setStatus({ accountId: account.accountId, running: false, configured: true, lastError: "missing userSig" });
+        ctx.setStatus({ accountId: account.accountId, running: false, connected: false, configured: true, lastError: "missing userSig" });
         return;
       }
 
@@ -295,6 +301,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
         ctx.setStatus({
           accountId: account.accountId,
           running: false,
+          connected: false,
           configured: !needsReconfigure,
           lastError: needsReconfigure 
             ? `${lastLoginError}. Run 'openclaw onboard timbot-ws' to reconfigure`
@@ -340,11 +347,24 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
         });
       });
 
+      // 注册网络状态变化监听，实时更新连接状态
+      transport.onNetStateChange(({ state }) => {
+        const isConnected = state === "connected";
+        ctx.log?.info(`[${account.accountId}] network state changed: ${state}, connected=${isConnected}`);
+        ctx.setStatus({
+          accountId: account.accountId,
+          connected: isConnected,
+          ...(isConnected ? { lastConnectedAt: Date.now() } : {}),
+        });
+      });
+
       ctx.log?.info(`[${account.accountId}] connected via WebSocket, sdkAppId=${sdkAppId}, userID=${userID}`);
       ctx.setStatus({
         accountId: account.accountId,
         running: true,
         configured: true,
+        connected: true,
+        lastConnectedAt: Date.now(),
         lastStartAt: Date.now(),
       });
 
@@ -365,6 +385,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
           ctx.setStatus({
             accountId: account.accountId,
             running: false,
+            connected: false,
             lastStopAt: Date.now(),
           });
           resolve();
@@ -380,6 +401,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
       ctx.setStatus({
         accountId: ctx.account.accountId,
         running: false,
+        connected: false,
         lastStopAt: Date.now(),
       });
     },

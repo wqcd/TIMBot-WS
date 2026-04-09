@@ -5,7 +5,7 @@ import type {
 } from "./types.js";
 
 export type TimbotWebhookRoutingTarget = {
-  account: Pick<ResolvedTimbotAccount, "configured" | "sdkAppId" | "botAccount">;
+  account: Pick<ResolvedTimbotAccount, "configured" | "sdkAppId" | "userId">;
 };
 
 function normalizeBotAccount(raw: string | undefined): string | undefined {
@@ -99,7 +99,7 @@ export function selectTimbotWebhookTarget<T extends TimbotWebhookRoutingTarget>(
   const toAccount = normalizeBotAccount(params.msg.To_Account);
   if (toAccount) {
     const directMatch = configuredTargets.find(
-      (candidate) => normalizeBotAccount(candidate.account.botAccount) === toAccount,
+      (candidate) => normalizeBotAccount(candidate.account.userId) === toAccount,
     );
     if (directMatch) return directMatch;
   }
@@ -122,7 +122,7 @@ export function selectTimbotWebhookTarget<T extends TimbotWebhookRoutingTarget>(
     if (!normalizedMention || seenMentions.has(normalizedMention)) continue;
     seenMentions.add(normalizedMention);
     const matched = configuredTargets.find(
-      (candidate) => normalizeBotAccount(candidate.account.botAccount) === normalizedMention,
+      (candidate) => normalizeBotAccount(candidate.account.userId) === normalizedMention,
     );
     if (matched) return matched;
   }

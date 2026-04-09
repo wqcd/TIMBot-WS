@@ -29,6 +29,15 @@ export type WsSendResult = {
   error?: string;
 };
 
+/** 网络状态枚举 */
+export type NetState = "connected" | "connecting" | "disconnected";
+
+/** 网络状态变化事件 */
+export type NetStateChangeEvent = {
+  state: NetState;
+  rawState: string;
+};
+
 /**
  * WsTransport 封装 IM SDK 的 WebSocket 连接和消息操作
  */
@@ -42,6 +51,8 @@ export class WsTransport {
   private _destroyed = false;
   private _loginTime = 0;
   private _messageHandler: ((event: { data: Message[] }) => void) | null = null;
+  private _netState: NetState = "disconnected";
+  private _netStateChangeHandler: ((event: NetStateChangeEvent) => void) | null = null;
 
   constructor(options: WsTransportOptions) {
     this.sdkAppId = options.sdkAppId;
@@ -75,8 +86,25 @@ export class WsTransport {
     });
 
     this.chat.on(Chat.EVENT.NET_STATE_CHANGE, (event: any) => {
-      const state = event?.data?.state;
-      this._log("info", `[ws-transport] network state: ${state}`);
+      const rawState = event?.data?.state ?? "unknown";
+      let state: NetState = "disconnected";
+      
+      // 根据 SDK 状态映射到我们的状态
+      if (rawState === Chat.TYPES.NET_STATE_CONNECTED) {
+        state = "connected";
+      } else if (rawState === Chat.TYPES.NET_STATE_CONNECTING) {
+        state = "connecting";
+      } else if (rawState === Chat.TYPES.NET_STATE_DISCONNECTED) {
+        state = "disconnected";
+      }
+      
+      this._netState = state;
+      this._log("info", `[ws-transport] network state: ${state} (raw: ${rawState})`);
+      
+      // 触发回调
+      if (this._netStateChangeHandler) {
+        this._netStateChangeHandler({ state, rawState });
+      }
     });
   }
 
@@ -87,6 +115,22 @@ export class WsTransport {
 
   get isReady(): boolean {
     return this._ready && !this._destroyed;
+  }
+
+  /** 获取当前网络状态 */
+  get netState(): NetState {
+    return this._netState;
+  }
+
+  /** 是否已连接到网络 */
+  get isConnected(): boolean {
+    return this._netState === "connected" && this._ready && !this._destroyed;
+  }
+
+  /** 注册网络状态变化回调 */
+  onNetStateChange(handler: (event: NetStateChangeEvent) => void): void {
+    this._netStateChangeHandler = handler;
+    this._log("info", "[ws-transport] network state change handler registered");
   }
 
   async login(): Promise<void> {
@@ -140,7 +184,7 @@ export class WsTransport {
       this._log("info", `[ws-transport] received ${count} message(s)`);
       if (count > 0) {
         for (const msg of event.data) {
-          this._log("info", `[ws-transport] msg: type=${msg?.type}, conv=${msg?.conversationType}, from=${msg?.from}, to=${msg?.to}`);
+          this._log("info", `[ws-transport] msg: type=${msg?.type}, conv=${msg?.conversationType}, from=${msg?.from}, to=${msg?.to}, nick=${msg?.nick || "N/A"}, nameCard=${msg?.nameCard || "N/A"}, avatar=${msg?.avatar ? "yes" : "N/A"}`);
         }
       }
       handler(event.data);

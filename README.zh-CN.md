@@ -49,8 +49,6 @@ bash install-timbot-ws.sh
 | `sdkAppId` | 是 | 腾讯云 IM SDK 应用 ID | — |
 | `userId` | 是 | 机器人登录 UserID（即发送/接收消息的身份标识） | — |
 | `userSig` | 是 | 用户签名，用于 SDK 登录鉴权 | — |
-| `identifier` | 否 | API 调用身份标识（未设置时回退到 `userId`） | — |
-| `botAccount` | 否 | 机器人账号 ID（未设置时回退到 `userId`） | — |
 | `enabled` | 否 | 是否启用该通道 | `true` |
 
 > **关于 UserSig**：建议设置有效期为 10 年（315360000 秒）。可在腾讯云 IM 控制台"开发辅助工具"中生成。如果 UserSig 泄露，可通过 REST API 撤销使其立即失效。详见 [UserSig 文档](https://cloud.tencent.com/document/product/269/32688)。

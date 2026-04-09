@@ -58,19 +58,13 @@ function patchTimbotWsAccountConfig(params: {
   accountId: string;
   enabled?: boolean;
   patch: Record<string, unknown>;
-  clearFields?: string[];
 }): OpenClawConfig {
-  const { cfg, accountId, enabled, patch, clearFields } = params;
+  const { cfg, accountId, enabled, patch } = params;
   const existing = (cfg.channels?.["timbot-ws"] ?? {}) as Record<string, any>;
 
   if (accountId === DEFAULT_ACCOUNT_ID) {
     const updated = { ...existing, ...patch };
     if (enabled !== undefined) updated.enabled = enabled;
-    if (clearFields) {
-      for (const field of clearFields) {
-        delete updated[field];
-      }
-    }
     return {
       ...cfg,
       channels: { ...cfg.channels, "timbot-ws": updated },
@@ -80,11 +74,6 @@ function patchTimbotWsAccountConfig(params: {
   const accounts = { ...(existing.accounts ?? {}) };
   const accountCfg = { ...(accounts[accountId] ?? {}), ...patch };
   if (enabled !== undefined) accountCfg.enabled = enabled;
-  if (clearFields) {
-    for (const field of clearFields) {
-      delete accountCfg[field];
-    }
-  }
   accounts[accountId] = accountCfg;
   return {
     ...cfg,
@@ -152,7 +141,7 @@ export const timbotWsSetupWizard: ChannelSetupWizard = {
       ],
       currentValue: ({ cfg, accountId }) => {
         const raw = getRawAccountConfig(cfg, accountId);
-        return raw.userId?.trim() || raw.identifier?.trim() || undefined;
+        return raw.userId?.trim() || undefined;
       },
       validate: ({ value }) => {
         const trimmed = String(value ?? "").trim();
@@ -167,7 +156,6 @@ export const timbotWsSetupWizard: ChannelSetupWizard = {
           enabled: true,
           patch: {
             userId: value,
-            botAccount: getRawAccountConfig(cfg, accountId).botAccount || value,
             dm: getRawAccountConfig(cfg, accountId).dm ?? { policy: "open", allowFrom: ["*"] },
           },
         }),

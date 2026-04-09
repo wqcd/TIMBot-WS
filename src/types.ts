@@ -12,9 +12,11 @@ export type TimbotAccountConfig = {
   enabled?: boolean;
 
   sdkAppId?: string;
+  /** @deprecated Use userId instead */
   identifier?: string;
   userId?: string;
   userSig?: string;
+  /** @deprecated Use userId instead */
   botAccount?: string;
 
   dm?: TimbotDmConfig;
@@ -37,10 +39,8 @@ export type ResolvedTimbotAccount = {
   enabled: boolean;
   configured: boolean;
   sdkAppId?: string;
-  identifier?: string;
   userId?: string;
   userSig?: string;
-  botAccount?: string;
   streamingMode: TimbotStreamingMode;
   fallbackPolicy: TimbotStreamingFallbackPolicy;
   overflowPolicy: TimbotOverflowPolicy;

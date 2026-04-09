@@ -8,7 +8,7 @@ export function setTimbotRuntime(next: PluginRuntime): void {
 
 export function getTimbotRuntime(): PluginRuntime {
   if (!runtime) {
-    throw new Error("Timbot runtime not initialized");
+    throw new Error("timbot-ws runtime not initialized");
   }
   return runtime;
 }

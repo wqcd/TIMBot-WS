@@ -1,6 +1,6 @@
 {
   "name": "timbot-ws",
-  "version": "2026.4.3-beta.1",
+  "version": "2026.4.7-beta.1",
   "type": "module",
   "description": "OpenClaw Tencent Cloud IM intelligent bot channel plugin via WebSocket SDK",
   "author": "longyuqi@tencent.com",
@@ -17,6 +17,7 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "package.json",
     "openclaw.plugin.json"
   ],
   "keywords": [
@@ -35,9 +36,19 @@
     "test": "pnpm build && node --test test/*.test.mjs"
   },
   "openclaw": {
+    "compat": {
+      "pluginApi": ">=2026.3.24"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24"
+    },
     "extensions": [
       "./dist/index.js"
     ],
+    "channels": [
+      "timbot-ws"
+    ],
+    "installDependencies": true,
     "channel": {
       "id": "timbot-ws",
       "label": "Tencent IM",
@@ -54,6 +65,7 @@
       "order": 85
     },
     "install": {
+      "minHostVersion": ">=2026.3.24",
       "npmSpec": "timbot-ws",
       "localPath": "extensions/timbot-ws",
       "defaultChoice": "npm"
@@ -68,7 +80,12 @@
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.1.30"
+    "openclaw": ">=2026.3.24"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
   },
   "overrides": {
     "axios": "1.14.0"

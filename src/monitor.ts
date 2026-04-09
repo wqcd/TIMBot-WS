@@ -64,7 +64,7 @@ function logVerbose(target: TimbotWsTarget, message: string): void {
 }
 
 function resolveOutboundSenderAccount(account: ResolvedTimbotAccount): string {
-  return account.botAccount || account.identifier || "administrator";
+  return account.userId || "administrator";
 }
 
 const TIMBOT_PARTIAL_STREAM_THROTTLE_MS = 1000;
@@ -422,7 +422,7 @@ function extractMediaInfoFromPayload(msgType: string, payload: any): InboundMedi
 }
 
 /** 将 SDK Message 转换为内部格式 */
-function adaptSdkMessage(sdkMsg: Message): { msg: TimbotInboundMessage; mediaInfos: InboundMediaInfo[] } {
+function adaptSdkMessage(sdkMsg: Message): { msg: TimbotInboundMessage; mediaInfos: InboundMediaInfo[]; senderNick?: string } {
   const isGroup = sdkMsg.conversationType === "GROUP";
   const msgBody: TimbotMsgBodyElement[] = [];
   const mediaInfos: InboundMediaInfo[] = [];
@@ -476,6 +476,11 @@ function adaptSdkMessage(sdkMsg: Message): { msg: TimbotInboundMessage; mediaInf
     atRobots.push(...sdkMsg.atUserList);
   }
 
+  // 提取发送者昵称：优先使用 nameCard（群名片），再 fallback 到 nick（个人昵称）
+  const nameCard = typeof sdkMsg.nameCard === "string" ? sdkMsg.nameCard.trim() : "";
+  const nick = typeof sdkMsg.nick === "string" ? sdkMsg.nick.trim() : "";
+  const senderNick = nameCard || nick || undefined;
+
   return {
     msg: {
       CallbackCommand: isGroup ? "Bot.OnGroupMessage" : "Bot.OnC2CMessage",
@@ -491,6 +496,7 @@ function adaptSdkMessage(sdkMsg: Message): { msg: TimbotInboundMessage; mediaInf
       CloudCustomData: sdkMsg.cloudCustomData || undefined,
     },
     mediaInfos,
+    senderNick,
   };
 }
 
@@ -586,7 +592,7 @@ export function handleWsMessage(params: {
 
   log(target, "info", `received ${messageList.length} message(s)`);
   for (const m of messageList) {
-    log(target, "info", `msg: flow=${m.flow}, type=${m.type}, conv=${m.conversationType}, from=${m.from}, to=${m.to}`);
+    log(target, "info", `msg: flow=${m.flow}, type=${m.type}, conv=${m.conversationType}, from=${m.from}, to=${m.to}, nick=${m.nick || "N/A"}, nameCard=${m.nameCard || "N/A"}`);
   }
 
   for (const sdkMsg of messageList) {
@@ -596,7 +602,7 @@ export function handleWsMessage(params: {
     }
 
     // 过滤自身消息
-    if (sdkMsg.from === outboundSender || sdkMsg.from === target.account.identifier) {
+    if (sdkMsg.from === outboundSender) {
       continue;
     }
 
@@ -606,7 +612,7 @@ export function handleWsMessage(params: {
       continue;
     }
 
-    const { msg, mediaInfos } = adaptSdkMessage(sdkMsg);
+    const { msg, mediaInfos, senderNick } = adaptSdkMessage(sdkMsg);
 
     target.statusSink?.({ lastInboundAt: Date.now() });
 
@@ -633,7 +639,7 @@ export function handleWsMessage(params: {
 
     if (isGroup) {
       // 检查是否 @了机器人
-      const botAccount = target.account.botAccount;
+      const botAccount = target.account.userId;
       const rawBody = extractTextFromMsgBody(msg.MsgBody);
       const mentionedAccounts = [
         ...(msg.AtRobots_Account ?? []),
@@ -644,22 +650,26 @@ export function handleWsMessage(params: {
         (m) => m.replace(/^＠/u, "@").toLowerCase() === normalizedBotAccount,
       );
 
-      // 也检查 atUserList
-      const wasMentionedByAtList = Array.isArray(sdkMsg.atUserList) && (
-        sdkMsg.atUserList.includes(target.account.botAccount ?? "") ||
-        sdkMsg.atUserList.includes(target.account.identifier ?? "")
+      // 也检查 atUserList - 需要检查所有可能的机器人标识符
+      // atUserList 包含被 @ 用户的 userID
+      const botIdentifiers = new Set<string>();
+      if (target.account.userId) botIdentifiers.add(target.account.userId);
+      if (target.account.name) botIdentifiers.add(target.account.name);
+      
+      const wasMentionedByAtList = Array.isArray(sdkMsg.atUserList) && sdkMsg.atUserList.some(
+        (atUserId: string) => botIdentifiers.has(atUserId),
       );
 
       if (!wasMentioned && !wasMentionedByAtList) {
-        logVerbose(target, `group msg not mentioned, skip: group=${msg.GroupId}, from=${msg.From_Account}`);
+        logVerbose(target, `group msg not mentioned, skip: group=${msg.GroupId}, from=${msg.From_Account}, atUserList=${JSON.stringify(sdkMsg.atUserList)}, botIdentifiers=${JSON.stringify([...botIdentifiers])}`);
         continue;
       }
 
-      processGroupAndReply({ target: enrichedTarget, msg, mediaInfos }).catch((err) => {
+      processGroupAndReply({ target: enrichedTarget, msg, mediaInfos, senderNick }).catch((err) => {
         target.runtime.error?.(`[${target.account.accountId}] timbot group agent failed: ${String(err)}`);
       });
     } else {
-      processAndReply({ target: enrichedTarget, msg, mediaInfos }).catch((err) => {
+      processAndReply({ target: enrichedTarget, msg, mediaInfos, senderNick }).catch((err) => {
         target.runtime.error?.(`[${target.account.accountId}] timbot agent failed: ${String(err)}`);
       });
     }
@@ -1370,8 +1380,9 @@ async function processAndReply(params: {
   target: TimbotWsTarget;
   msg: TimbotInboundMessage;
   mediaInfos: InboundMediaInfo[];
+  senderNick?: string;
 }): Promise<void> {
-  const { target, msg, mediaInfos } = params;
+  const { target, msg, mediaInfos, senderNick } = params;
   const core = target.core;
   const config = target.config;
   const account = target.account;
@@ -1429,7 +1440,7 @@ async function processAndReply(params: {
 
   logVerbose(target, `route: agentId=${route.agentId}`);
 
-  const fromLabel = `user:${fromAccount}`;
+  const fromLabel = senderNick ? `${senderNick} (${fromAccount})` : `user:${fromAccount}`;
   const storePath = core.channel.session.resolveStorePath(config.session?.store, {
     agentId: route.agentId,
   });
@@ -1454,12 +1465,12 @@ async function processAndReply(params: {
     RawBody: effectiveRawBody,
     CommandBody: effectiveRawBody,
     From: `timbot:${fromAccount}`,
-    To: `timbot:${account.botAccount || msg.To_Account || "bot"}`,
+    To: `timbot:${account.userId || msg.To_Account || "bot"}`,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: "direct",
     ConversationLabel: fromLabel,
-    SenderName: fromAccount,
+    SenderName: senderNick || fromAccount,
     SenderId: fromAccount,
     Provider: "timbot-ws",
     Surface: "timbot-ws",
@@ -1480,7 +1491,7 @@ async function processAndReply(params: {
     sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
     ctx: ctxPayload,
     onRecordError: (err) => {
-      target.runtime.error?.(`timbot: failed updating session meta: ${String(err)}`);
+      target.runtime.error?.(`timbot-ws: failed updating session meta: ${String(err)}`);
     },
   });
 
@@ -1577,8 +1588,9 @@ async function processGroupAndReply(params: {
   target: TimbotWsTarget;
   msg: TimbotInboundMessage;
   mediaInfos: InboundMediaInfo[];
+  senderNick?: string;
 }): Promise<void> {
-  const { target, msg, mediaInfos } = params;
+  const { target, msg, mediaInfos, senderNick } = params;
   const core = target.core;
   const config = target.config;
   const account = target.account;
@@ -1637,7 +1649,7 @@ async function processGroupAndReply(params: {
   logVerbose(target, `route: agentId=${route.agentId}, group=${groupId}`);
 
   const groupLabel = `group:${groupId}`;
-  const senderLabel = `user:${fromAccount}`;
+  const senderLabel = senderNick ? `${senderNick} (${fromAccount})` : `user:${fromAccount}`;
   const storePath = core.channel.session.resolveStorePath(config.session?.store, {
     agentId: route.agentId,
   });
@@ -1664,13 +1676,13 @@ async function processGroupAndReply(params: {
     RawBody: effectiveRawBody,
     CommandBody: effectiveRawBody,
     From: `timbot:group:${groupId}`,
-    To: `timbot:${account.botAccount || msg.To_Account || "bot"}`,
+    To: `timbot:${account.userId || msg.To_Account || "bot"}`,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: "group",
     ConversationLabel: groupLabel,
     GroupSubject: undefined,
-    SenderName: fromAccount,
+    SenderName: senderNick || fromAccount,
     SenderId: fromAccount,
     Provider: "timbot-ws",
     Surface: "timbot-ws",
