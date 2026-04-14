@@ -370,9 +370,17 @@ def step_configure(args):
     print("  OK 配置已写入 " + str(OPENCLAW_CONFIG))
 
 
+def step_stop_gateway():
+    """停止 Gateway"""
+    step("[5.1] 停止 Gateway...")
+    run(["openclaw", "gateway", "stop"], check=False)
+    time.sleep(2)
+    print("  OK Gateway 已停止")
+
+
 def step_restart_gateway():
     """重启 Gateway"""
-    step("[6/6] 重启 Gateway...")
+    step("[6/6] 启动 Gateway...")
     result = run(["openclaw", "gateway", "restart"], check=False)
     if result.returncode != 0:
         print("  WARN 自动重启失败，请手动执行:")
@@ -395,6 +403,7 @@ def do_install(args):
         step_build()
 
     step_install_plugin()
+    step_stop_gateway()
     step_configure(args)
     step_restart_gateway()
 
