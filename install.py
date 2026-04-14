@@ -256,28 +256,22 @@ def step_build():
 
 def step_install_plugin():
     """安装插件到 OpenClaw"""
-    step("[4/6] 安装插件到 OpenClaw...")
+    step("[4/7] 安装插件到 OpenClaw...")
 
     # 清理旧扩展
     if EXTENSION_DIR.exists():
         shutil.rmtree(EXTENSION_DIR)
         print("  OK 旧扩展已清理")
 
-    # 使用 openclaw plugins install
-    result = run(["openclaw", "plugins", "install", "-l", str(SCRIPT_DIR)], check=False)
-    if result.returncode != 0:
-        # fallback: 手动拷贝
-        print("  WARN openclaw plugins install 失败，尝试手动安装...")
-        EXTENSION_DIR.mkdir(parents=True, exist_ok=True)
-        for item in ["dist", "package.json", "openclaw.plugin.json"]:
-            src = SCRIPT_DIR / item
-            if src.is_dir():
-                shutil.copytree(str(src), str(EXTENSION_DIR / item), dirs_exist_ok=True)
-            elif src.exists():
-                shutil.copy2(str(src), str(EXTENSION_DIR / item))
-        print("  OK 手动安装完成")
-    else:
-        print("  OK 插件已安装")
+    # 直接拷贝到 extensions 目录（比 openclaw plugins install 快得多）
+    EXTENSION_DIR.mkdir(parents=True, exist_ok=True)
+    for item in ["dist", "package.json", "openclaw.plugin.json"]:
+        src = SCRIPT_DIR / item
+        if src.is_dir():
+            shutil.copytree(str(src), str(EXTENSION_DIR / item), dirs_exist_ok=True)
+        elif src.exists():
+            shutil.copy2(str(src), str(EXTENSION_DIR / item))
+    print("  OK 插件已安装 (手动拷贝模式)")
 
 
 def login_for_user_id(sig_endpoint: str, sig_username: str, sig_password: str) -> str:
