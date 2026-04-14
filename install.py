@@ -280,6 +280,45 @@ def step_install_plugin():
         print("  OK 插件已安装")
 
 
+def login_for_user_id(sig_endpoint: str, sig_username: str, sig_password: str) -> str:
+    """调用登录接口获取 user_id"""
+    import urllib.request
+    import urllib.error
+
+    url = sig_endpoint
+    body = json.dumps({"username": sig_username, "password": sig_password}).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+
+    print(f"  > POST {url}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"  ERROR 登录接口返回 HTTP {e.code}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"  ERROR 登录接口连接失败: {e}")
+        sys.exit(1)
+
+    if data.get("code", -1) != 0:
+        print(f"  ERROR 登录失败: code={data.get('code')}, message={data.get('message', '')}")
+        sys.exit(1)
+
+    results = data.get("results") or data.get("data") or {}
+    user_id = results.get("user_id") or results.get("userId") or results.get("user_id")
+    sig = results.get("sig") or results.get("userSig")
+
+    if user_id:
+        print(f"  OK 登录成功, user_id={user_id}")
+    else:
+        print(f"  WARN 登录成功但未返回 user_id (响应: {json.dumps(data)[:200]})")
+
+    if sig:
+        print(f"  OK sig 获取成功 (length={len(sig)})")
+
+    return user_id
+
+
 def step_configure(args):
     """配置 channels"""
     step("[5/6] 配置 channels...")
@@ -289,7 +328,6 @@ def step_configure(args):
 
     # 获取配置参数（命令行 > 交互式）
     sdk_app_id = args.sdk_app_id or prompt_input("腾讯 IM SDKAppID")
-    user_id = args.user_id or prompt_input("机器人 UserID", default="administrator")
 
     use_remote = True
     if not args.sig_endpoint:
@@ -299,13 +337,24 @@ def step_configure(args):
     sig_username = None
     sig_password = None
     user_sig = None
+    user_id = args.user_id or None
 
     if use_remote or args.sig_endpoint:
         sig_endpoint = args.sig_endpoint or prompt_input("登录接口地址 (如 http://192.168.1.100:8080/login/password)")
         sig_username = args.sig_username or prompt_input("登录账号")
         sig_password = args.sig_password or prompt_input("登录密码")
+
+        # 自动从登录接口获取 user_id
+        if not user_id:
+            print("\n  正在通过登录接口获取 user_id...")
+            user_id = login_for_user_id(sig_endpoint, sig_username, sig_password) or None
+
+        # 如果登录接口没返回 user_id，再手动问
+        if not user_id:
+            user_id = prompt_input("机器人 UserID（登录接口未返回，需手动填写）")
     else:
         user_sig = prompt_input("静态 UserSig（建议有效期 10 年）")
+        user_id = user_id or prompt_input("机器人 UserID", default="administrator")
 
     config = add_plugin_config(
         config,

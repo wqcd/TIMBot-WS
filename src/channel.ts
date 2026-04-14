@@ -218,7 +218,6 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
         return;
       }
 
-      const userID = account.userId || "administrator";
       const userSig = account.userSig;
       const sigEndpoint = account.sigEndpoint;
       const sigUsername = account.sigUsername;
@@ -231,6 +230,9 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
         ctx.setStatus({ accountId: account.accountId, running: false, connected: false, configured: true, lastError: "missing userSig or sigEndpoint config" });
         return;
       }
+
+      // 用于动态存储从登录接口获取的 userID
+      let resolvedUserID = account.userId || "administrator";
 
       // 构建 UserSig 获取函数：优先使用远端登录接口，否则使用静态配置值
       const userSigProvider = sigLoginConfigured
@@ -256,6 +258,11 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
               if (!sig) {
                 throw new Error(`login response missing sig: ${JSON.stringify(data).slice(0, 200)}`);
               }
+              // 如果配置了 userId 则用配置的，否则用登录返回的 user_id
+              if (!account.userId && results.user_id) {
+                resolvedUserID = results.user_id;
+                ctx.log?.info(`[${account.accountId}] resolved userID from login: ${resolvedUserID}`);
+              }
               ctx.log?.info(`[${account.accountId}] userSig fetched successfully (length=${sig.length})`);
               return sig;
             } catch (err: any) {
@@ -264,6 +271,24 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
             }
           }
         : undefined;
+
+      // 先获取一次 sig 以确定 userID
+      if (userSigProvider) {
+        try {
+          const sig = await userSigProvider();
+          if (!sig) {
+            ctx.log?.error(`[${account.accountId}] userSigProvider returned empty`);
+            ctx.setStatus({ accountId: account.accountId, running: false, connected: false, lastError: "userSigProvider returned empty" });
+            return;
+          }
+        } catch (err: any) {
+          ctx.log?.error(`[${account.accountId}] initial sig fetch failed: ${err.message}`);
+          ctx.setStatus({ accountId: account.accountId, running: false, connected: false, lastError: `initial sig fetch failed: ${err.message}` });
+          return;
+        }
+      }
+
+      const userID = resolvedUserID;
 
       const transport = new WsTransport({
         sdkAppId,
