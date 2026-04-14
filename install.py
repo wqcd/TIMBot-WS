@@ -263,14 +263,33 @@ def step_install_plugin():
         shutil.rmtree(EXTENSION_DIR)
         print("  OK 旧扩展已清理")
 
-    # 先尝试 openclaw plugins install（官方方式）
-    result = run(["openclaw", "plugins", "install", "-l", str(SCRIPT_DIR)], check=False)
-    if result.returncode == 0:
-        print("  OK 插件已安装 (openclaw plugins install)")
-        return
+    # 先尝试 openclaw plugins install（官方方式），60秒超时
+    print("  正在安装 (openclaw plugins install)...")
+    try:
+        proc = subprocess.Popen(
+            ["openclaw", "plugins", "install", "-l", str(SCRIPT_DIR)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        try:
+            stdout, _ = proc.communicate(timeout=60)
+            if proc.returncode == 0 or "Linked plugin path" in (stdout or ""):
+                print("  OK 插件已安装 (openclaw plugins install)")
+                # 修复 node.es.js 的 type: module warning
+                _fix_sdk_bundle_package_json()
+                return
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            # 超时不一定失败，检查是否已安装
+            if EXTENSION_DIR.exists() or (SCRIPT_DIR / "dist" / "index.js").exists():
+                print("  OK 插件已安装 (openclaw plugins install, 超时但安装成功)")
+                _fix_sdk_bundle_package_json()
+                return
+            print("  WARN openclaw plugins install 超时，使用手动拷贝...")
+    except FileNotFoundError:
+        print("  WARN openclaw 命令未找到，使用手动拷贝...")
 
     # fallback: 手动拷贝
-    print("  WARN openclaw plugins install 失败，使用手动拷贝...")
     EXTENSION_DIR.mkdir(parents=True, exist_ok=True)
     for item in ["dist", "package.json", "openclaw.plugin.json"]:
         src = SCRIPT_DIR / item
@@ -278,7 +297,25 @@ def step_install_plugin():
             shutil.copytree(str(src), str(EXTENSION_DIR / item), dirs_exist_ok=True)
         elif src.exists():
             shutil.copy2(str(src), str(EXTENSION_DIR / item))
+    _fix_sdk_bundle_package_json()
     print("  OK 插件已安装 (手动拷贝模式)")
+
+
+def _fix_sdk_bundle_package_json():
+    """修复 im-sdk-bundle 的 package.json，消除 Node.js type warning"""
+    # 项目内 dist
+    bundle_pkg = SCRIPT_DIR / "dist" / "im-sdk-bundle" / "package.json"
+    bundle_dir = SCRIPT_DIR / "dist" / "im-sdk-bundle"
+    if bundle_dir.exists() and not bundle_pkg.exists():
+        with open(bundle_pkg, "w", encoding="utf-8") as f:
+            json.dump({"type": "module"}, f)
+
+    # 扩展目录
+    ext_pkg = EXTENSION_DIR / "dist" / "im-sdk-bundle" / "package.json"
+    ext_dir = EXTENSION_DIR / "dist" / "im-sdk-bundle"
+    if ext_dir.exists() and not ext_pkg.exists():
+        with open(ext_pkg, "w", encoding="utf-8") as f:
+            json.dump({"type": "module"}, f)
 
 
 def login_for_user_id(sig_endpoint: str, sig_username: str, sig_password: str) -> str:
