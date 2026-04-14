@@ -263,7 +263,14 @@ def step_install_plugin():
         shutil.rmtree(EXTENSION_DIR)
         print("  OK 旧扩展已清理")
 
-    # 直接拷贝到 extensions 目录（比 openclaw plugins install 快得多）
+    # 先尝试 openclaw plugins install（官方方式）
+    result = run(["openclaw", "plugins", "install", "-l", str(SCRIPT_DIR)], check=False)
+    if result.returncode == 0:
+        print("  OK 插件已安装 (openclaw plugins install)")
+        return
+
+    # fallback: 手动拷贝
+    print("  WARN openclaw plugins install 失败，使用手动拷贝...")
     EXTENSION_DIR.mkdir(parents=True, exist_ok=True)
     for item in ["dist", "package.json", "openclaw.plugin.json"]:
         src = SCRIPT_DIR / item
