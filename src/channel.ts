@@ -126,6 +126,15 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
     chunkerMode: "text",
     textChunkLimit: 10000,
     sendText: async ({ account, target, text }) => {
+      if (!target) {
+        return {
+          channel: "timbot-ws",
+          ok: false,
+          messageId: "",
+          error: new Error("sendText: target is undefined"),
+        };
+      }
+
       // 群消息以 group: 开头
       if (target.startsWith("group:")) {
         const groupId = target.slice("group:".length);
@@ -155,6 +164,24 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
         ok: result.ok,
         messageId: result.messageId ?? "",
         error: result.error ? new Error(result.error) : undefined,
+      };
+    },
+    sendMedia: async ({ account, target }) => {
+      if (!target) {
+        return {
+          channel: "timbot-ws",
+          ok: false,
+          messageId: "",
+          error: new Error("sendMedia: target is undefined"),
+        };
+      }
+      // timbot-ws 通过 SDK 不支持主动发送媒体文件
+      // 返回 not-implemented，让 OpenClaw 上层走文本降级
+      return {
+        channel: "timbot-ws",
+        ok: false,
+        messageId: "",
+        error: new Error("timbot-ws does not support outbound media via SDK WebSocket"),
       };
     },
   },
