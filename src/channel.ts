@@ -70,7 +70,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
       deleteAccountFromConfigSection({
         cfg: cfg as OpenClawConfig,
         sectionKey: "timbot-ws",
-        clearBaseFields: ["name", "sdkAppId", "userId", "userSig", "welcomeText", "typingText", "streamingMode", "fallbackPolicy", "overflowPolicy"],
+        clearBaseFields: ["name", "sdkAppId", "userId", "userSig", "sigEndpoint", "sigUsername", "sigPassword", "welcomeText", "typingText", "streamingMode", "fallbackPolicy", "overflowPolicy"],
         accountId,
       }),
     isConfigured: (account) => account.configured,
@@ -203,7 +203,7 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
       const account = ctx.account;
 
       ctx.log?.debug(`starting account: ${account.accountId}, configured=${account.configured}, enabled=${account.enabled}`);
-      ctx.log?.debug(`sdkAppId=${account.sdkAppId ?? "unset"}, userId=${account.userId ?? "unset"}, userSig=${account.userSig ? "set" : "unset"}`);
+      ctx.log?.debug(`sdkAppId=${account.sdkAppId ?? "unset"}, userId=${account.userId ?? "unset"}, userSig=${account.userSig ? "set" : "unset"}, sigEndpoint=${account.sigEndpoint ?? "unset"}`);
 
       if (!account.configured) {
         ctx.log?.warn(`[${account.accountId}] not configured, skipping`);
@@ -220,17 +220,56 @@ export const timbotPlugin: ChannelPlugin<ResolvedTimbotAccount> = {
 
       const userID = account.userId || "administrator";
       const userSig = account.userSig;
+      const sigEndpoint = account.sigEndpoint;
+      const sigUsername = account.sigUsername;
+      const sigPassword = account.sigPassword;
 
-      if (!userSig) {
-        ctx.log?.error(`[${account.accountId}] userSig required`);
-        ctx.setStatus({ accountId: account.accountId, running: false, connected: false, configured: true, lastError: "missing userSig" });
+      const sigLoginConfigured = sigEndpoint && sigUsername && sigPassword;
+
+      if (!userSig && !sigLoginConfigured) {
+        ctx.log?.error(`[${account.accountId}] userSig or (sigEndpoint + sigUsername + sigPassword) required`);
+        ctx.setStatus({ accountId: account.accountId, running: false, connected: false, configured: true, lastError: "missing userSig or sigEndpoint config" });
         return;
       }
+
+      // 构建 UserSig 获取函数：优先使用远端登录接口，否则使用静态配置值
+      const userSigProvider = sigLoginConfigured
+        ? async (): Promise<string> => {
+            ctx.log?.info(`[${account.accountId}] fetching userSig via login: POST ${sigEndpoint}`);
+            try {
+              const resp = await fetch(sigEndpoint!, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: sigUsername, password: sigPassword }),
+                signal: AbortSignal.timeout(10_000),
+              });
+              if (!resp.ok) {
+                throw new Error(`login endpoint returned HTTP ${resp.status}`);
+              }
+              const data = await resp.json() as any;
+              // 支持 { code: 0, results: { sig: "..." } } 格式
+              if (data.code !== undefined && data.code !== 0) {
+                throw new Error(`login failed: code=${data.code}, message=${data.message || "unknown"}`);
+              }
+              const results = data.results || data.data || data;
+              const sig = results.sig || results.userSig || results.UserSig;
+              if (!sig) {
+                throw new Error(`login response missing sig: ${JSON.stringify(data).slice(0, 200)}`);
+              }
+              ctx.log?.info(`[${account.accountId}] userSig fetched successfully (length=${sig.length})`);
+              return sig;
+            } catch (err: any) {
+              ctx.log?.error(`[${account.accountId}] failed to fetch userSig: ${err.message}`);
+              throw err;
+            }
+          }
+        : undefined;
 
       const transport = new WsTransport({
         sdkAppId,
         userID,
         userSig,
+        userSigProvider,
         log: (level, msg) => {
           if (level === "error") ctx.log?.error(msg);
           else if (level === "warn") ctx.log?.warn(msg);

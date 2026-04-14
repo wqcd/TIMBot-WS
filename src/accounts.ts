@@ -71,6 +71,9 @@ export function resolveTimbotAccount(params: {
   const sdkAppId = merged.sdkAppId?.trim() || undefined;
   const userId = merged.userId?.trim() || undefined;
   const userSig = merged.userSig?.trim() || undefined;
+  const sigEndpoint = merged.sigEndpoint?.trim() || undefined;
+  const sigUsername = merged.sigUsername?.trim() || undefined;
+  const sigPassword = merged.sigPassword?.trim() || undefined;
   const streamingMode: TimbotStreamingMode =
     merged.streamingMode === "custom_modify"
       ? "custom_modify"
@@ -88,15 +91,17 @@ export function resolveTimbotAccount(params: {
       ? "split"
       : "stop";
 
-  // 配置完整需要 sdkAppId + userId + userSig
-  const configured = Boolean(sdkAppId && userId && userSig);
+  // 远端登录配置完整需要 sigEndpoint + sigUsername + sigPassword
+  const sigLoginConfigured = Boolean(sigEndpoint && sigUsername && sigPassword);
+  // 配置完整需要 sdkAppId + userId + (userSig 或远端登录)
+  const configured = Boolean(sdkAppId && userId && (userSig || sigLoginConfigured));
 
   // 配置不完整时输出警告
   if (!configured && Boolean(timbotConfig)) {
     const missing: string[] = [];
     if (!sdkAppId) missing.push("sdkAppId");
     if (!userId) missing.push("userId");
-    if (!userSig) missing.push("userSig");
+    if (!userSig && !sigLoginConfigured) missing.push("userSig or (sigEndpoint + sigUsername + sigPassword)");
     if (missing.length > 0) {
       logSimple("warn", `incomplete config, missing: ${missing.join(", ")}`);
     }
@@ -110,6 +115,9 @@ export function resolveTimbotAccount(params: {
     sdkAppId,
     userId,
     userSig,
+    sigEndpoint,
+    sigUsername,
+    sigPassword,
     streamingMode,
     fallbackPolicy,
     overflowPolicy,

@@ -20,6 +20,8 @@ export type WsTransportOptions = {
   sdkAppId: number;
   userID: string;
   userSig?: string;
+  /** 动态获取 UserSig 的函数，优先于静态 userSig */
+  userSigProvider?: () => Promise<string>;
   log?: (level: "info" | "warn" | "error", message: string) => void;
 };
 
@@ -46,6 +48,7 @@ export class WsTransport {
   private sdkAppId: number;
   private userID: string;
   private userSig?: string;
+  private userSigProvider?: () => Promise<string>;
   private _log: (level: "info" | "warn" | "error", message: string) => void;
   private _ready = false;
   private _destroyed = false;
@@ -58,6 +61,7 @@ export class WsTransport {
     this.sdkAppId = options.sdkAppId;
     this.userID = options.userID;
     this.userSig = options.userSig;
+    this.userSigProvider = options.userSigProvider;
     this._log = options.log ?? ((level, msg) => logSimple(level, msg));
 
     this.chat = Chat.create({ SDKAppID: this.sdkAppId });
@@ -133,14 +137,29 @@ export class WsTransport {
     this._log("info", "[ws-transport] network state change handler registered");
   }
 
-  async login(): Promise<void> {
-    if (!this.userSig?.trim()) {
-      throw new Error("[ws-transport] userSig is required");
+  /** 获取有效的 UserSig，优先使用 provider 动态获取 */
+  private async resolveUserSig(): Promise<string> {
+    if (this.userSigProvider) {
+      this._log("info", "[ws-transport] fetching userSig from provider...");
+      const sig = await this.userSigProvider();
+      if (!sig?.trim()) {
+        throw new Error("[ws-transport] userSigProvider returned empty sig");
+      }
+      this.userSig = sig;
+      return sig;
     }
+    if (!this.userSig?.trim()) {
+      throw new Error("[ws-transport] userSig is required (no static sig and no provider configured)");
+    }
+    return this.userSig;
+  }
+
+  async login(): Promise<void> {
+    const sig = await this.resolveUserSig();
 
     this._log("info", `[ws-transport] login: userID=${this.userID}, sdkAppId=${this.sdkAppId}`);
     this._loginTime = Math.floor(Date.now() / 1000);
-    await this.chat.login({ userID: this.userID, userSig: this.userSig });
+    await this.chat.login({ userID: this.userID, userSig: sig });
     this._log("info", "[ws-transport] login successful");
 
     if (!this._ready) {
@@ -149,11 +168,9 @@ export class WsTransport {
   }
 
   private async _relogin(): Promise<void> {
-    if (!this.userSig?.trim()) {
-      throw new Error("[ws-transport] userSig is required for relogin");
-    }
+    const sig = await this.resolveUserSig();
     this._loginTime = Math.floor(Date.now() / 1000);
-    await this.chat.login({ userID: this.userID, userSig: this.userSig });
+    await this.chat.login({ userID: this.userID, userSig: sig });
     this._log("info", "[ws-transport] relogin successful");
   }
 

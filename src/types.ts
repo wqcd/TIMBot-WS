@@ -16,6 +16,12 @@ export type TimbotAccountConfig = {
   identifier?: string;
   userId?: string;
   userSig?: string;
+  /** 远端登录接口地址，如 http://your-server/login/password。优先于静态 userSig */
+  sigEndpoint?: string;
+  /** 远端登录账号 */
+  sigUsername?: string;
+  /** 远端登录密码 */
+  sigPassword?: string;
   /** @deprecated Use userId instead */
   botAccount?: string;
 
@@ -41,6 +47,12 @@ export type ResolvedTimbotAccount = {
   sdkAppId?: string;
   userId?: string;
   userSig?: string;
+  /** 远端登录接口地址，优先于静态 userSig */
+  sigEndpoint?: string;
+  /** 远端登录账号 */
+  sigUsername?: string;
+  /** 远端登录密码 */
+  sigPassword?: string;
   streamingMode: TimbotStreamingMode;
   fallbackPolicy: TimbotStreamingFallbackPolicy;
   overflowPolicy: TimbotOverflowPolicy;
